@@ -16,10 +16,8 @@ fn main() -> Result<(), DriverError> {
 
     // 5×7 标准字体（每字符 6px 宽，含 1px 间距）
     text::draw_text(&mut display.framebuffer, 0, 0, "Hello SSD1309!");
-
-    // 4×6 小字体（密集内容，每字符 5px 宽）
-    text::draw_small(&mut display.framebuffer, 0, 12, "i2c_display_driver");
-    text::draw_small(&mut display.framebuffer, 0, 20, "128x64 monochrome");
+    text::draw_text(&mut display.framebuffer, 0, 12, "i2c_display_driver");
+    text::draw_text(&mut display.framebuffer, 0, 20, "128x64 monochrome");
 
     // 基础图形
     canvas::draw_rect(&mut display.framebuffer, 0, 32, 60, 20);

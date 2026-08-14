@@ -7,7 +7,7 @@
 - **I2C 底层封装**：`/dev/i2c-N` + `ioctl(I2C_SLAVE)` 绑定从机地址，命令（0x00）/ 数据（0x40）分通道写入
 - **SSD1309 控制器驱动**：初始化、逐页推帧、对比度、反色、休眠 / 唤醒、总线恢复
 - **1-bit 帧缓冲**：1024 字节（8 页 × 128 列），实现 embedded-graphics `DrawTarget`
-- **文字渲染**：5×7 标准 + 4×6 小字体，支持反色 / 紧凑模式
+- **文字渲染**：5×7 字体，支持反色 / 紧凑模式
 - **基础图形**：矩形、直线、圆、三角形（含填充与点线）
 - **稳定显示**：`render_robust()` 自动恢复、逐页推帧避开 Pi 5 RP1 大块传输限制、栈缓冲区零堆分配
 
@@ -43,7 +43,7 @@ use i2c_display_driver::graphics::{canvas, text};
 
 display.framebuffer.clear();
 text::draw_text(&mut display.framebuffer, 0, 0, "ALERT: high temp");
-text::draw_small(&mut display.framebuffer, 0, 16, "details");
+text::draw_text(&mut display.framebuffer, 0, 16, "details");
 canvas::draw_rect(&mut display.framebuffer, 0, 30, 40, 20);
 canvas::fill_circle(&mut display.framebuffer, 100, 40, 10);
 display.render()?;
@@ -71,7 +71,7 @@ lib.rs ── pub mod display; pub mod error; pub mod graphics;
 │   ├── framebuffer.rs  1-bit 帧缓冲（embedded-graphics DrawTarget）
 │   └── mod.rs          Display 顶层句柄（open / render / render_robust / recover）
 ├── graphics/
-│   ├── font.rs         5×7 + 4×6 位图字体
+│   ├── font.rs         5×7 位图字体
 │   ├── text.rs         文字渲染
 │   └── canvas.rs       基础图形
 └── error.rs            DriverError 统一错误类型

@@ -4,7 +4,7 @@
 //!
 //! * [`display::Display`] — 顶层句柄（open / render / render_robust / recover / sleep / wake / set_contrast / set_inverted）
 //! * [`display::Framebuffer`] — 1-bit 帧缓冲，实现 embedded-graphics `DrawTarget`
-//! * [`graphics`] — 文字（5×7 + 4×6）与基础图形绘制
+//! * [`graphics`] — 文字（5×7）与基础图形绘制
 //! * [`DriverError`] — 统一错误类型
 
 pub mod display;

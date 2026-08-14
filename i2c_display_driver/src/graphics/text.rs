@@ -1,8 +1,7 @@
-//! 文本渲染器 —— 支持 5×7 和 4×6 两种字号。
+//! 文本渲染器 —— 5×7 字体。
 //!
 //! * `draw_text` / `draw_text_packed` — 5×7 标准字体
-//! * `draw_small` / `draw_small_packed` — 4×6 小号字体（密集日志 / 告警）
-//! * `draw_text_inverted` — 5×7 反色模式（需先填充背景）
+//! * `draw_text_inverted` — 反色模式（需先填充背景）
 
 use super::font;
 use crate::display::Framebuffer;
@@ -12,28 +11,16 @@ enum DrawMode {
     Clear,
 }
 
-// 5×7 标准字体
-
 pub fn draw_text(fb: &mut Framebuffer, x: usize, y: usize, text: &str) {
-    draw_impl(fb, x, y, text, 1, DrawMode::Set, false);
+    draw_impl(fb, x, y, text, 1, DrawMode::Set);
 }
 
 pub fn draw_text_packed(fb: &mut Framebuffer, x: usize, y: usize, text: &str) {
-    draw_impl(fb, x, y, text, 0, DrawMode::Set, false);
+    draw_impl(fb, x, y, text, 0, DrawMode::Set);
 }
 
 pub fn draw_text_inverted(fb: &mut Framebuffer, x: usize, y: usize, text: &str) {
-    draw_impl(fb, x, y, text, 1, DrawMode::Clear, false);
-}
-
-// 4×6 小号字体
-
-pub fn draw_small(fb: &mut Framebuffer, x: usize, y: usize, text: &str) {
-    draw_impl(fb, x, y, text, 1, DrawMode::Set, true);
-}
-
-pub fn draw_small_packed(fb: &mut Framebuffer, x: usize, y: usize, text: &str) {
-    draw_impl(fb, x, y, text, 0, DrawMode::Set, true);
+    draw_impl(fb, x, y, text, 1, DrawMode::Clear);
 }
 
 fn draw_impl(
@@ -43,19 +30,7 @@ fn draw_impl(
     text: &str,
     gap: usize,
     mode: DrawMode,
-    small: bool,
 ) {
-    let char_w = if small {
-        font::CHAR_WIDTH_SMALL
-    } else {
-        font::CHAR_WIDTH
-    };
-    let char_h = if small {
-        font::CHAR_HEIGHT_SMALL
-    } else {
-        font::CHAR_HEIGHT
-    };
-
     let mut cx = x;
     for ch in text.chars() {
         if ch == '\n' {
@@ -66,17 +41,13 @@ fn draw_impl(
         if cx >= 128 {
             break;
         }
-        let glyph: &[u8] = if small {
-            font::glyph_small(ch)
-        } else {
-            font::glyph(ch)
-        };
+        let glyph = font::glyph(ch);
         for (col, &col_data) in glyph.iter().enumerate() {
             let px = cx + col;
             if px >= 128 {
                 break;
             }
-            for bit in 0..char_h {
+            for bit in 0..font::CHAR_HEIGHT {
                 let py = y + bit;
                 if py >= 64 {
                     break;
@@ -87,7 +58,7 @@ fn draw_impl(
                 }
             }
         }
-        cx += char_w + gap;
+        cx += font::CHAR_WIDTH + gap;
     }
 }
 
@@ -95,12 +66,6 @@ fn draw_impl(
 #[inline]
 pub fn text_width(text: &str, gap: usize) -> usize {
     text.chars().count() * (font::CHAR_WIDTH + gap)
-}
-
-/// 小号字体文本宽度（4×6）。
-#[inline]
-pub fn text_width_small(text: &str, gap: usize) -> usize {
-    text.chars().count() * (font::CHAR_WIDTH_SMALL + gap)
 }
 
 #[cfg(test)]
@@ -111,18 +76,6 @@ mod tests {
     fn draw_text_ok() {
         let mut fb = Framebuffer::new();
         draw_text(&mut fb, 0, 0, "OK");
-    }
-
-    #[test]
-    fn draw_small_ok() {
-        let mut fb = Framebuffer::new();
-        draw_small(&mut fb, 0, 0, "ok");
-    }
-
-    #[test]
-    fn draw_small_packed_ok() {
-        let mut fb = Framebuffer::new();
-        draw_small_packed(&mut fb, 0, 0, "CPU 48.5°C");
     }
 
     #[test]
@@ -144,9 +97,8 @@ mod tests {
     }
 
     #[test]
-    fn width_comparison() {
+    fn packed_is_narrower() {
         assert!(text_width("CPU", 0) < text_width("CPU", 1));
-        assert!(text_width_small("CPU", 0) < text_width("CPU", 0));
     }
 
     #[test]

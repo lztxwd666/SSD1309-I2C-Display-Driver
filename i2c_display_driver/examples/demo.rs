@@ -26,14 +26,13 @@ fn main() -> Result<(), DriverError> {
     }
 }
 
-/// 帧 1：文字 —— 5×7 / 紧凑 / 反色 / 4×6 小字体。
+/// 帧 1：文字 —— 5×7 标准 / 紧凑 / 反色。
 fn show_text(display: &mut Display) -> Result<(), DriverError> {
     display.framebuffer.clear();
 
     text::draw_text(&mut display.framebuffer, 0, 0, "Text 5x7");
     text::draw_text_packed(&mut display.framebuffer, 0, 10, "PACKED");
-    text::draw_small(&mut display.framebuffer, 0, 20, "small 4x6");
-    text::draw_small_packed(&mut display.framebuffer, 0, 28, "packed small");
+    text::draw_text(&mut display.framebuffer, 0, 20, "normal text");
 
     // 反色文字：先填充白色背景，再清除字形像素
     canvas::fill_rect(&mut display.framebuffer, 0, 40, 128, 16);
@@ -64,7 +63,7 @@ fn show_shapes(display: &mut Display) -> Result<(), DriverError> {
     Ok(())
 }
 
-/// 帧 3：日志 / 告警模拟 —— 反色标题 + 4×6 小字体日志行 + 进度条。
+/// 帧 3：日志 / 告警模拟 —— 反色标题 + 5×7 日志行 + 进度条。
 fn show_logs(display: &mut Display) -> Result<(), DriverError> {
     display.framebuffer.clear();
 
@@ -72,11 +71,11 @@ fn show_logs(display: &mut Display) -> Result<(), DriverError> {
     canvas::fill_rect(&mut display.framebuffer, 0, 0, 128, 9);
     text::draw_text_inverted(&mut display.framebuffer, 2, 1, "ALERT");
 
-    // 日志行（4×6 小字体，密集）
-    text::draw_small(&mut display.framebuffer, 0, 12, "[12:00:01] CPU 72C");
-    text::draw_small(&mut display.framebuffer, 0, 20, "[12:00:02] mem 85%");
-    text::draw_small(&mut display.framebuffer, 0, 28, "[12:00:03] disk 90%");
-    text::draw_small(&mut display.framebuffer, 0, 36, "[12:00:04] ssh login");
+    // 日志行（5×7）
+    text::draw_text(&mut display.framebuffer, 0, 12, "[12:00:01] CPU 72C");
+    text::draw_text(&mut display.framebuffer, 0, 20, "[12:00:02] mem 85%");
+    text::draw_text(&mut display.framebuffer, 0, 28, "[12:00:03] disk 90%");
+    text::draw_text(&mut display.framebuffer, 0, 36, "[12:00:04] ssh login");
 
     // 进度条（矩形边框 + 填充）
     canvas::draw_rect(&mut display.framebuffer, 0, 50, 100, 8);
