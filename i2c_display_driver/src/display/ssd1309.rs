@@ -56,4 +56,15 @@ impl Ssd1309 {
     pub fn sleep(&mut self) -> io::Result<()> {
         self.bus.write_command(&[0xAE])
     }
+
+    /// 开启显示（0xAF）。与 `sleep()` 相对。
+    pub fn wake(&mut self) -> io::Result<()> {
+        self.bus.write_command(&[0xAF])
+    }
+
+    /// 设置反色显示（0xA7）或正常显示（0xA6）。
+    pub fn set_inverted(&mut self, inverted: bool) -> io::Result<()> {
+        self.bus
+            .write_command(&[if inverted { 0xA7 } else { 0xA6 }])
+    }
 }
