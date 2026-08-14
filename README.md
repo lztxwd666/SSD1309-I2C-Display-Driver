@@ -97,7 +97,12 @@ cargo check        # 快速检查
 cargo clippy       # 静态检查
 ```
 
-## 后续计划
+## 示例
 
-- 提供 examples/ 示例（初始化 + 文字 / 图形绘制 + 循环推帧）
-- 可选：为硬件层加 `#[cfg(target_os = "linux")]` 门控，使纯逻辑部分可在 Windows 上运行单测
+```bash
+cargo run --example hello   # 最小示例：文字 + 图形 + 推帧
+cargo run --example demo    # 综合演示：循环展示文字 / 图形 / 日志 / 反色 / 对比度
+```
+
+- `examples/hello.rs` 验证基本链路（I2C → 帧缓冲 → 文字 / 图形 → 推帧）
+- `examples/demo.rs` 循环展示全部功能，含 `render_robust()` 自动恢复演示
