@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "i2c_display_driver"
+]
+resolver = "2"

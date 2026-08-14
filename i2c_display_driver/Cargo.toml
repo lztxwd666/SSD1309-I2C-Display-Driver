@@ -1,0 +1,12 @@
+[package]
+name = "i2c_display_driver"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libc = "0.2"
+embedded-graphics = "0.8"
+
+[lib]
+name = "i2c_display_driver"
+path = "src/lib.rs"
