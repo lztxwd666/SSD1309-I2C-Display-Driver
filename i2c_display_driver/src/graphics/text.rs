@@ -2,7 +2,6 @@
 //!
 //! * `draw_text` / `draw_text_packed` — 5×7 标准字体
 //! * `draw_text_inverted` — 反色模式（需先填充背景）
-//! * `draw_text_italic` — 斜体（oblique 斜切，顶部向右倾斜）
 
 use super::font;
 use crate::display::Framebuffer;
@@ -22,38 +21,6 @@ pub fn draw_text_packed(fb: &mut Framebuffer, x: usize, y: usize, text: &str) {
 
 pub fn draw_text_inverted(fb: &mut Framebuffer, x: usize, y: usize, text: &str) {
     draw_impl(fb, x, y, text, 1, DrawMode::Clear);
-}
-
-/// 斜体倾斜表：行号 -> 水平偏移（顶部向右倾斜，标准 oblique 斜切）。
-const ITALIC_SHEAR: [usize; 7] = [2, 2, 1, 1, 0, 0, 0];
-
-/// 斜体文字（oblique 斜切，顶部向右倾斜 2px）。
-pub fn draw_text_italic(fb: &mut Framebuffer, x: usize, y: usize, text: &str) {
-    let mut cx = x;
-    for ch in text.chars() {
-        if ch == '\n' {
-            cx = x;
-            continue;
-        }
-        // 字符完全在屏幕右侧之外 → 整行提前退出
-        if cx >= 128 {
-            break;
-        }
-        let glyph = font::glyph(ch);
-        for (col, &col_data) in glyph.iter().enumerate() {
-            for bit in 0..font::CHAR_HEIGHT {
-                if (col_data & (1 << bit)) != 0 {
-                    let px = cx + col + ITALIC_SHEAR[bit];
-                    let py = y + bit;
-                    if px < 128 && py < 64 {
-                        fb.set_pixel(px, py, true);
-                    }
-                }
-            }
-        }
-        // 斜体字符步进 = 原宽 + 最大偏移 + 1px 间距
-        cx += font::CHAR_WIDTH + ITALIC_SHEAR[0] + 1;
-    }
 }
 
 fn draw_impl(
@@ -127,12 +94,6 @@ mod tests {
         }
         draw_text_inverted(&mut fb, 0, 0, "OK");
         assert!(!fb.get_pixel(0, 3));
-    }
-
-    #[test]
-    fn italic_renders() {
-        let mut fb = Framebuffer::new();
-        draw_text_italic(&mut fb, 0, 0, "Italic");
     }
 
     #[test]
