@@ -114,9 +114,11 @@ cargo clippy       # 静态检查
 ## 示例
 
 ```bash
-cargo run --example smoke      # 冒烟测试：文字 + 图形 + 推帧
-cargo run --example showcase   # 全功能演示：循环展示文字 / 图形 / 日志 / 反色 / 对比度
+cargo run --example smoke           # 冒烟测试：文字 + 图形 + 推帧
+cargo run --example showcase        # 全功能演示：循环展示文字 / 图形 / 日志 / 反色 / 对比度
+cargo run --example feature_check   # 新功能验证：clear/fill / 全屏点亮 / 局部推帧 / 滚动 / recover / 统计
 ```
 
 - `examples/smoke.rs` 验证基本链路（I2C → 帧缓冲 → 文字 / 图形 → 推帧）
 - `examples/showcase.rs` 循环展示全部功能，含 `render_robust()` 自动恢复演示
+- `examples/feature_check.rs` 逐项验证新增功能，并打印脏矩形与运行统计
