@@ -12,28 +12,6 @@ use std::time::Duration;
 use super::framebuffer::{Framebuffer, HEIGHT, WIDTH};
 use super::i2c_bus::I2cDevice;
 
-/// 水平滚动方向。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScrollDirection {
-    /// 向右滚动。
-    Right,
-    /// 向左滚动。
-    Left,
-}
-
-/// 滚动帧间隔（每移动 1 像素的帧数）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScrollFrameInterval {
-    Frames2 = 0x07,
-    Frames3 = 0x04,
-    Frames4 = 0x05,
-    Frames5 = 0x00,
-    Frames25 = 0x06,
-    Frames64 = 0x01,
-    Frames128 = 0x02,
-    Frames256 = 0x03,
-}
-
 /// SSD1309 控制器。泛型参数 `B` 为底层 I2C 设备。
 pub struct Ssd1309<B: I2cDevice> {
     bus: B,
@@ -96,7 +74,7 @@ impl<B: I2cDevice> Ssd1309<B> {
             return Ok(());
         }
         let y0 = y.min(HEIGHT);
-        let y1 = (y + h).min(HEIGHT);
+        let y1 = y.saturating_add(h).min(HEIGHT);
         if y0 >= y1 {
             return Ok(());
         }
@@ -140,88 +118,6 @@ impl<B: I2cDevice> Ssd1309<B> {
     pub fn wake(&mut self) -> io::Result<()> {
         self.bus.write_command(&[0xAF])
     }
-
-    /// 设置连续水平滚动（0x26/0x27）。
-    ///
-    /// `start_page` 与 `end_page` 为参与滚动的页范围（0-7）。
-    /// 设置后需调用 [`activate_scroll`](Self::activate_scroll) 生效。
-    pub fn scroll_horizontal(
-        &mut self,
-        dir: ScrollDirection,
-        start_page: u8,
-        end_page: u8,
-        interval: ScrollFrameInterval,
-    ) -> io::Result<()> {
-        validate_pages(start_page, end_page)?;
-        let cmd = match dir {
-            ScrollDirection::Right => 0x26,
-            ScrollDirection::Left => 0x27,
-        };
-        self.bus
-            .write_command(&[cmd, 0x00, start_page, interval as u8, end_page, 0x00, 0xFF])
-    }
-
-    /// 设置垂直 + 水平连续滚动（0x29/0x2A）。
-    ///
-    /// `vertical_offset`（0-63）为垂直滚动步长。
-    /// 需先通过 [`set_vertical_scroll_area`](Self::set_vertical_scroll_area) 设置滚动区域，
-    /// 再调用 [`activate_scroll`](Self::activate_scroll) 生效。
-    pub fn scroll_vertical_horizontal(
-        &mut self,
-        dir: ScrollDirection,
-        start_page: u8,
-        end_page: u8,
-        interval: ScrollFrameInterval,
-        vertical_offset: u8,
-    ) -> io::Result<()> {
-        validate_pages(start_page, end_page)?;
-        if vertical_offset > 63 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("垂直滚动偏移超出范围: {vertical_offset} > 63"),
-            ));
-        }
-        let cmd = match dir {
-            ScrollDirection::Right => 0x29,
-            ScrollDirection::Left => 0x2A,
-        };
-        self.bus.write_command(&[
-            cmd,
-            0x00,
-            start_page,
-            interval as u8,
-            end_page,
-            vertical_offset,
-            0x00,
-            0xFF,
-        ])
-    }
-
-    /// 设置垂直滚动区域（0xA3）：顶部固定行数与底部固定行数。
-    pub fn set_vertical_scroll_area(&mut self, top_fixed: u8, bottom_fixed: u8) -> io::Result<()> {
-        self.bus.write_command(&[0xA3, top_fixed, bottom_fixed])
-    }
-
-    /// 激活滚动（0x2F）。
-    pub fn activate_scroll(&mut self) -> io::Result<()> {
-        self.bus.write_command(&[0x2F])
-    }
-
-    /// 取消滚动（0x2E）。
-    pub fn deactivate_scroll(&mut self) -> io::Result<()> {
-        self.bus.write_command(&[0x2E])
-    }
-}
-
-/// 校验滚动页范围（0-7 且 start <= end）。
-fn validate_pages(start_page: u8, end_page: u8) -> io::Result<()> {
-    if start_page > 7 || end_page > 7 || start_page > end_page {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("滚动页范围无效: {start_page}..{end_page}（应为 0-7）"),
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -497,90 +393,22 @@ mod tests {
     }
 
     #[test]
-    fn scroll_commands_write_expected_bytes() {
+    fn render_region_extreme_height_no_panic() {
+        // 回归测试：极端 h 不应导致加法溢出（saturating 裁剪后正常推送）
         let (log, bus) = mock_bus();
         let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
         let init_count = log.lock().unwrap().len();
+        let fb = Framebuffer::new();
 
-        ssd.scroll_horizontal(ScrollDirection::Right, 0, 3, ScrollFrameInterval::Frames5)
-            .unwrap();
-        ssd.scroll_vertical_horizontal(
-            ScrollDirection::Left,
-            1,
-            5,
-            ScrollFrameInterval::Frames64,
-            10,
-        )
-        .unwrap();
-        ssd.set_vertical_scroll_area(0, 64).unwrap();
-        ssd.activate_scroll().unwrap();
-        ssd.deactivate_scroll().unwrap();
+        // h=usize::MAX 裁剪为 (0,0,10,64)：覆盖全部 8 页
+        ssd.render_region(&fb, 0, 0, 10, usize::MAX).unwrap();
+        // 裁剪为 (0,60,10,4)：只覆盖 page7
+        ssd.render_region(&fb, 0, 60, 10, usize::MAX).unwrap();
 
         let w = writes_after_init(&log, init_count);
-        assert_eq!(
-            w[0],
-            Write {
-                control: 0x00,
-                bytes: vec![0x26, 0x00, 0x00, 0x00, 0x03, 0x00, 0xFF]
-            }
-        );
-        assert_eq!(
-            w[1],
-            Write {
-                control: 0x00,
-                bytes: vec![0x2A, 0x00, 0x01, 0x01, 0x05, 0x0A, 0x00, 0xFF]
-            }
-        );
-        assert_eq!(
-            w[2],
-            Write {
-                control: 0x00,
-                bytes: vec![0xA3, 0x00, 0x40]
-            }
-        );
-        assert_eq!(
-            w[3],
-            Write {
-                control: 0x00,
-                bytes: vec![0x2F]
-            }
-        );
-        assert_eq!(
-            w[4],
-            Write {
-                control: 0x00,
-                bytes: vec![0x2E]
-            }
-        );
-    }
-
-    #[test]
-    fn scroll_rejects_invalid_pages() {
-        let (log, bus) = mock_bus();
-        let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
-        assert!(
-            ssd.scroll_horizontal(ScrollDirection::Right, 8, 3, ScrollFrameInterval::Frames5)
-                .is_err()
-        );
-        assert!(
-            ssd.scroll_horizontal(ScrollDirection::Right, 0, 9, ScrollFrameInterval::Frames5)
-                .is_err()
-        );
-        assert!(
-            ssd.scroll_horizontal(ScrollDirection::Right, 3, 2, ScrollFrameInterval::Frames5)
-                .is_err()
-        );
-        assert!(
-            ssd.scroll_vertical_horizontal(
-                ScrollDirection::Right,
-                0,
-                1,
-                ScrollFrameInterval::Frames5,
-                64
-            )
-            .is_err()
-        );
-        let _ = log;
+        assert_eq!(w.len(), (8 + 1) * 3, "8 页 + 1 页，每页 3 次写入");
+        assert_eq!(w[2].bytes.len(), 10);
+        assert_eq!(w[8 * 3].bytes[0], 0xB7, "第二区域页地址应为 page7");
     }
 
     #[test]

@@ -59,10 +59,20 @@ fn draw_impl(fb: &mut Framebuffer, x: usize, y: usize, text: &str, gap: usize, m
 }
 
 /// 估算文本像素宽度（5×7）：多行取最长一行。
+///
+/// 与 `draw_impl` 的实际绘制一致：n 个字符占 `n×5 + (n-1)×gap` 像素
+/// （末字符之后没有间距）。
 #[inline]
 pub fn text_width(text: &str, gap: usize) -> usize {
     text.lines()
-        .map(|line| line.chars().count() * (font::CHAR_WIDTH + gap))
+        .map(|line| {
+            let n = line.chars().count();
+            if n == 0 {
+                0
+            } else {
+                n * font::CHAR_WIDTH + (n - 1) * gap
+            }
+        })
         .max()
         .unwrap_or(0)
 }
@@ -122,5 +132,14 @@ mod tests {
     fn text_width_takes_wide_line() {
         assert_eq!(text_width("AB\nCDE", 0), 5 * 3); // 最长行 "CDE"
         assert_eq!(text_width("", 1), 0);
+    }
+
+    #[test]
+    fn text_width_matches_draw_impl_formula() {
+        // 公式验证：n×5 + (n-1)×gap（末字符后无间距）
+        assert_eq!(text_width("AB", 1), 11);
+        assert_eq!(text_width("ABC", 2), 19);
+        assert_eq!(text_width("A", 10), 5); // 单字符无间距
+        assert_eq!(text_width("AB\nCD", 3), 13); // 多行取最长（两行等宽）
     }
 }

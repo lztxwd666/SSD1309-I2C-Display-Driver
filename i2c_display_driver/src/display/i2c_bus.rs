@@ -33,8 +33,6 @@ pub trait I2cDeviceFactory: Sized {
 /// Linux I2C 总线。
 pub struct I2cBus {
     file: fs::File,
-    #[allow(dead_code)]
-    addr: u8,
 }
 
 /// I2C 写入，错误原样返回（不做重试）。
@@ -57,7 +55,7 @@ impl I2cBus {
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self { file, addr })
+        Ok(Self { file })
     }
 }
 

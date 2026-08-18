@@ -3,15 +3,15 @@
 //! 提供矩形、直线、圆、三角形及其填充，以及点线变体。
 //! 所有坐标越界均静默裁剪，与 `Framebuffer::set_pixel` 保持一致。
 
-use crate::display::Framebuffer;
+use crate::display::{Framebuffer, HEIGHT, WIDTH};
 
 /// 绘制矩形边框（空心）。
 pub fn draw_rect(fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize) {
-    if w == 0 || h == 0 || x >= 128 || y >= 64 {
+    if w == 0 || h == 0 || x >= WIDTH || y >= HEIGHT {
         return;
     }
-    let x2 = x.saturating_add(w.saturating_sub(1)).min(127);
-    let y2 = y.saturating_add(h.saturating_sub(1)).min(63);
+    let x2 = x.saturating_add(w.saturating_sub(1)).min(WIDTH - 1);
+    let y2 = y.saturating_add(h.saturating_sub(1)).min(HEIGHT - 1);
 
     for px in x..=x2 {
         fb.set_pixel(px, y, true);
@@ -25,11 +25,11 @@ pub fn draw_rect(fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize) {
 
 /// 绘制实心矩形（填充）。
 pub fn fill_rect(fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize) {
-    if w == 0 || h == 0 || x >= 128 || y >= 64 {
+    if w == 0 || h == 0 || x >= WIDTH || y >= HEIGHT {
         return;
     }
-    let x2 = (x + w).min(128);
-    let y2 = (y + h).min(64);
+    let x2 = x.saturating_add(w).min(WIDTH);
+    let y2 = y.saturating_add(h).min(HEIGHT);
     for py in y..y2 {
         for px in x..x2 {
             fb.set_pixel(px, py, true);
@@ -177,7 +177,7 @@ pub fn draw_vline_dotted(fb: &mut Framebuffer, x: usize, y: usize, len: usize) {
 /// 若坐标在屏幕内则点亮该像素。
 #[inline]
 fn plot(fb: &mut Framebuffer, x: i32, y: i32) {
-    if (0..128).contains(&x) && (0..64).contains(&y) {
+    if (0..WIDTH as i32).contains(&x) && (0..HEIGHT as i32).contains(&y) {
         fb.set_pixel(x as usize, y as usize, true);
     }
 }
@@ -202,11 +202,11 @@ fn plot8(fb: &mut Framebuffer, cx: i32, cy: i32, x: i32, y: i32) {
 /// 在 y 行填充 [x0, x1] 区间（越界裁剪）。
 #[inline]
 fn fill_row(fb: &mut Framebuffer, x0: i32, x1: i32, y: i32) {
-    if !(0..64).contains(&y) {
+    if !(0..HEIGHT as i32).contains(&y) {
         return;
     }
     let x0 = x0.max(0) as usize;
-    let x1 = x1.min(127) as usize;
+    let x1 = x1.min(WIDTH as i32 - 1) as usize;
     for x in x0..=x1 {
         fb.set_pixel(x, y as usize, true);
     }
@@ -296,5 +296,15 @@ mod tests {
         draw_rect(&mut fb, 10, 10, 0, 0);
         draw_rect(&mut fb, 10, 10, 1, 0);
         assert!(fb.get_pixel(10, 10));
+    }
+
+    #[test]
+    fn fill_rect_extreme_size_no_panic() {
+        // 回归测试：极端 w/h 不应导致加法溢出（saturating 裁剪）
+        let mut fb = Framebuffer::new();
+        fill_rect(&mut fb, 100, 50, usize::MAX, usize::MAX);
+        fill_rect(&mut fb, 0, 0, usize::MAX, usize::MAX);
+        // 边界填充应被裁剪到屏幕内
+        assert!(fb.get_pixel(127, 63));
     }
 }

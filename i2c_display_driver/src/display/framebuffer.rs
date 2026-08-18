@@ -69,14 +69,7 @@ impl Framebuffer {
         if x >= WIDTH || y >= HEIGHT {
             return;
         }
-        let page = y >> 3; // y / 8
-        let bit = (y & 0x07) as u8; // y % 8
-        let idx = (page << 7) + x; // page * WIDTH + x
-        if on {
-            self.buffer[idx] |= 1 << bit;
-        } else {
-            self.buffer[idx] &= !(1 << bit);
-        }
+        write_pixel(&mut self.buffer, x, y, on);
         self.mark_dirty(x, y);
     }
 
@@ -125,13 +118,127 @@ impl Framebuffer {
     }
 }
 
+/// 写入单个像素位（调用方需保证坐标在屏幕范围内）。
+///
+/// 页布局：`buffer[page * WIDTH + col]`，bit0 为页内顶部像素。
+#[inline]
+fn write_pixel(buffer: &mut [u8; WIDTH * HEIGHT / 8], x: usize, y: usize, on: bool) {
+    let page = y >> 3; // y / 8
+    let bit = (y & 0x07) as u8; // y % 8
+    let idx = page * WIDTH + x;
+    if on {
+        buffer[idx] |= 1 << bit;
+    } else {
+        buffer[idx] &= !(1 << bit);
+    }
+}
+
 impl Default for Framebuffer {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ── embedded-graphics 集成 ────────────────────────────────
+/// 多页帧缓冲：N 个独立页面，支持循环翻页。
+///
+/// 每页是完整的 128×64 帧缓冲，页面内容在切换间保留；
+/// 翻页只切换"当前页"索引。配合
+/// [`Display::show_page`](crate::display::Display::show_page) 将当前页推帧到屏幕。
+///
+/// 典型用法（多页仪表）：绘制各页内容 → 定时/按键翻页 → 推帧显示。
+pub struct PageBuffer<const N: usize> {
+    pages: [Framebuffer; N],
+    current: usize,
+}
+
+impl<const N: usize> PageBuffer<N> {
+    /// 创建 N 页全黑帧缓冲，当前页为 0。
+    pub fn new() -> Self {
+        Self {
+            pages: std::array::from_fn(|_| Framebuffer::new()),
+            current: 0,
+        }
+    }
+
+    /// 当前页的可变引用（用于绘制）。
+    ///
+    /// 注意：返回的是**当前页**。初始化多页内容时应使用
+    /// [`page_at_mut`](Self::page_at_mut) 显式指定页，或先
+    /// [`show`](Self::show) 切换再调用本方法——连续调用本方法
+    /// 会反复绘制同一页，页面之间不会自动前进。
+    ///
+    /// 调用前提：`N >= 1`（`N == 0` 时无页可绘制，会 panic）。
+    pub fn page(&mut self) -> &mut Framebuffer {
+        &mut self.pages[self.current]
+    }
+
+    /// 指定页的只读引用；索引越界时返回 `None`。
+    pub fn page_at(&self, index: usize) -> Option<&Framebuffer> {
+        self.pages.get(index)
+    }
+
+    /// 指定页的可变引用（用于绘制）；索引越界时返回 `None`。
+    ///
+    /// 多页初始化绘制的推荐入口：无需切换当前页即可逐页填充内容。
+    pub fn page_at_mut(&mut self, index: usize) -> Option<&mut Framebuffer> {
+        self.pages.get_mut(index)
+    }
+
+    /// 当前页码（0 起始）。
+    pub fn current(&self) -> usize {
+        self.current
+    }
+
+    /// 页总数。
+    pub fn len(&self) -> usize {
+        N
+    }
+
+    /// 是否无页（`N == 0` 时恒为 `true`）。
+    pub fn is_empty(&self) -> bool {
+        N == 0
+    }
+
+    /// 切换到指定页；索引越界时不切换并返回 `false`。
+    pub fn show(&mut self, index: usize) -> bool {
+        if index < N {
+            self.current = index;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 翻到下一页（循环：末页回到首页），返回新页码。
+    ///
+    /// `N == 0` 时恒返回 0（无页可翻，不 panic）。
+    pub fn next_page(&mut self) -> usize {
+        if N == 0 {
+            return 0;
+        }
+        self.current = (self.current + 1) % N;
+        self.current
+    }
+
+    /// 翻到上一页（循环：首页回到末页），返回新页码。
+    ///
+    /// `N == 0` 时恒返回 0（无页可翻，不 panic）。
+    pub fn prev_page(&mut self) -> usize {
+        if N == 0 {
+            return 0;
+        }
+        self.current = (self.current + N - 1) % N;
+        self.current
+    }
+}
+
+impl<const N: usize> Default for PageBuffer<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// embedded-graphics 集成
 
 impl OriginDimensions for Framebuffer {
     fn size(&self) -> Size {
@@ -152,14 +259,7 @@ impl DrawTarget for Framebuffer {
             let y = coord.y;
             // 忽略越界像素（embedded-graphics 可能产生负坐标或超出范围的坐标）
             if (0..WIDTH as i32).contains(&x) && (0..HEIGHT as i32).contains(&y) {
-                let page = y as usize >> 3;
-                let bit = (y & 0x07) as u8;
-                let idx = (page << 7) + x as usize;
-                if color.is_on() {
-                    self.buffer[idx] |= 1 << bit;
-                } else {
-                    self.buffer[idx] &= !(1 << bit);
-                }
+                write_pixel(&mut self.buffer, x as usize, y as usize, color.is_on());
                 self.mark_dirty(x as usize, y as usize);
             }
         }
@@ -248,5 +348,76 @@ mod tests {
         let mut fb = Framebuffer::new();
         fb.clear();
         assert_eq!(fb.dirty_rect(), Some((0, 0, WIDTH, HEIGHT)));
+    }
+
+    #[test]
+    fn page_buffer_isolates_pages() {
+        let mut pages = PageBuffer::<3>::new();
+        assert_eq!(pages.len(), 3);
+        assert_eq!(pages.current(), 0);
+
+        // 当前页绘制不影响其他页
+        pages.page().set_pixel(5, 5, true);
+        assert!(pages.page_at(0).unwrap().get_pixel(5, 5));
+        assert!(!pages.page_at(1).unwrap().get_pixel(5, 5));
+        assert!(!pages.page_at(2).unwrap().get_pixel(5, 5));
+    }
+
+    /// 回归测试：多页初始化绘制（page_at_mut 逐页填充）时各页内容必须独立。
+    /// 曾因误用 `page()`（始终返回当前页）导致所有内容画进同一页。
+    #[test]
+    fn page_buffer_draws_each_page_independently() {
+        let mut pages = PageBuffer::<3>::new();
+        // 逐页绘制不同像素
+        pages.page_at_mut(0).unwrap().set_pixel(0, 0, true);
+        pages.page_at_mut(1).unwrap().set_pixel(10, 10, true);
+        pages.page_at_mut(2).unwrap().set_pixel(20, 20, true);
+
+        // 每页只含自己的像素
+        assert!(pages.page_at(0).unwrap().get_pixel(0, 0));
+        assert!(!pages.page_at(0).unwrap().get_pixel(10, 10));
+        assert!(pages.page_at(1).unwrap().get_pixel(10, 10));
+        assert!(!pages.page_at(1).unwrap().get_pixel(20, 20));
+        assert!(pages.page_at(2).unwrap().get_pixel(20, 20));
+        assert!(!pages.page_at(2).unwrap().get_pixel(0, 0));
+
+        // page_at_mut 越界返回 None
+        assert!(pages.page_at_mut(3).is_none());
+    }
+
+    #[test]
+    fn page_buffer_wraps_around() {
+        let mut pages = PageBuffer::<3>::new();
+        // 下一页循环：0 → 1 → 2 → 0
+        assert_eq!(pages.next_page(), 1);
+        assert_eq!(pages.next_page(), 2);
+        assert_eq!(pages.next_page(), 0);
+        // 上一页循环：0 → 2 → 1 → 0
+        assert_eq!(pages.prev_page(), 2);
+        assert_eq!(pages.prev_page(), 1);
+        assert_eq!(pages.prev_page(), 0);
+    }
+
+    #[test]
+    fn page_buffer_zero_pages_no_panic() {
+        // 回归测试：N=0 时翻页方法不应除零 panic
+        let mut pages = PageBuffer::<0>::new();
+        assert!(pages.is_empty());
+        assert_eq!(pages.len(), 0);
+        assert_eq!(pages.next_page(), 0);
+        assert_eq!(pages.prev_page(), 0);
+        assert!(!pages.show(0));
+        assert!(pages.page_at(0).is_none());
+        assert!(pages.page_at_mut(0).is_none());
+    }
+
+    #[test]
+    fn page_buffer_show_validates_index() {
+        let mut pages = PageBuffer::<3>::new();
+        assert!(pages.show(2));
+        assert_eq!(pages.current(), 2);
+        assert!(!pages.show(3)); // 越界不切换
+        assert_eq!(pages.current(), 2);
+        assert!(pages.page_at(3).is_none());
     }
 }
