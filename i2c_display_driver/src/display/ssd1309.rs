@@ -232,26 +232,27 @@ fn validate_pages(start_page: u8, end_page: u8) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::display::mock::{MockBus, Write};
-    use std::cell::{Cell, RefCell};
+    use std::cell::Cell;
     use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     /// 构造带独立日志的 MockBus。
-    fn mock_bus() -> (Rc<RefCell<Vec<Write>>>, MockBus) {
-        let log = Rc::new(RefCell::new(Vec::new()));
-        let bus = MockBus::new(Rc::clone(&log), Rc::new(Cell::new(0)));
+    fn mock_bus() -> (Arc<Mutex<Vec<Write>>>, MockBus) {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let bus = MockBus::new(Arc::clone(&log), Rc::new(Cell::new(0)));
         (log, bus)
     }
 
     /// 取第 n 次写入（跳过初始化产生的写入）。
-    fn writes_after_init(log: &Rc<RefCell<Vec<Write>>>, init_count: usize) -> Vec<Write> {
-        log.borrow()[init_count..].to_vec()
+    fn writes_after_init(log: &Arc<Mutex<Vec<Write>>>, init_count: usize) -> Vec<Write> {
+        log.lock().unwrap()[init_count..].to_vec()
     }
 
     #[test]
     fn init_writes_full_sequence() {
         let (log, bus) = mock_bus();
         Ssd1309::init(bus, 0xCF, false, true).unwrap();
-        let w = log.borrow();
+        let w = log.lock().unwrap();
         assert_eq!(w[0], Write { control: 0x00, bytes: vec![0xAE] });
         assert_eq!(w[1], Write { control: 0x00, bytes: vec![0xD5, 0x80] });
         assert_eq!(w[2], Write { control: 0x00, bytes: vec![0xA8, 0x3F] });
@@ -277,7 +278,7 @@ mod tests {
         // 自定义对比度 + 反色 + 不开启显示
         let (log, bus) = mock_bus();
         Ssd1309::init(bus, 0x40, true, false).unwrap();
-        let w = log.borrow();
+        let w = log.lock().unwrap();
         assert!(w.contains(&Write { control: 0x00, bytes: vec![0x81, 0x40] }));
         assert!(w.contains(&Write { control: 0x00, bytes: vec![0xA7] }));
         // 最后一条不应是 0xAF（display_on=false）
@@ -288,7 +289,7 @@ mod tests {
     fn push_frame_writes_8_pages() {
         let (log, bus) = mock_bus();
         let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
-        let init_count = log.borrow().len();
+        let init_count = log.lock().unwrap().len();
 
         let mut fb = Framebuffer::new();
         fb.set_pixel(0, 0, true); // page0 第一字节 bit0
@@ -298,11 +299,12 @@ mod tests {
         let w = writes_after_init(&log, init_count);
         // 8 页 × (页命令 + 列命令 + 数据)
         assert_eq!(w.len(), 24);
-        for page in 0..8 {
-            assert_eq!(w[page * 3], Write { control: 0x00, bytes: vec![0xB0 | page] });
-            assert_eq!(w[page * 3 + 1], Write { control: 0x00, bytes: vec![0x00, 0x10] });
-            assert_eq!(w[page * 3 + 2].control, 0x40);
-            assert_eq!(w[page * 3 + 2].bytes.len(), WIDTH);
+        for page in 0..8u8 {
+            let p = page as usize * 3;
+            assert_eq!(w[p], Write { control: 0x00, bytes: vec![0xB0 | page] });
+            assert_eq!(w[p + 1], Write { control: 0x00, bytes: vec![0x00, 0x10] });
+            assert_eq!(w[p + 2].control, 0x40);
+            assert_eq!(w[p + 2].bytes.len(), WIDTH);
         }
         // 校验数据内容
         assert_eq!(w[0].bytes[0], 0x01); // (0,0) bit0
@@ -313,7 +315,7 @@ mod tests {
     fn render_region_writes_only_covered_pages() {
         let (log, bus) = mock_bus();
         let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
-        let init_count = log.borrow().len();
+        let init_count = log.lock().unwrap().len();
 
         let mut fb = Framebuffer::new();
         // 区域 (10, 5, 20, 10) 覆盖 page0(行5-7) 与 page1(行8-14)
@@ -338,21 +340,21 @@ mod tests {
     fn render_region_clips_and_noops() {
         let (log, bus) = mock_bus();
         let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
-        let init_count = log.borrow().len();
+        let init_count = log.lock().unwrap().len();
 
         let fb = Framebuffer::new();
         // 完全越界 → 空操作
         ssd.render_region(&fb, 200, 200, 10, 10).unwrap();
         // 零宽 → 空操作
         ssd.render_region(&fb, 0, 0, 0, 10).unwrap();
-        assert_eq!(log.borrow().len(), init_count);
+        assert_eq!(log.lock().unwrap().len(), init_count);
     }
 
     #[test]
     fn scroll_commands_write_expected_bytes() {
         let (log, bus) = mock_bus();
         let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
-        let init_count = log.borrow().len();
+        let init_count = log.lock().unwrap().len();
 
         ssd.scroll_horizontal(ScrollDirection::Right, 0, 3, ScrollFrameInterval::Frames5).unwrap();
         ssd.scroll_vertical_horizontal(ScrollDirection::Left, 1, 5, ScrollFrameInterval::Frames64, 10).unwrap();
@@ -383,7 +385,7 @@ mod tests {
     fn control_commands_write_expected_bytes() {
         let (log, bus) = mock_bus();
         let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
-        let init_count = log.borrow().len();
+        let init_count = log.lock().unwrap().len();
 
         ssd.set_contrast(0x40).unwrap();
         ssd.set_inverted(true).unwrap();

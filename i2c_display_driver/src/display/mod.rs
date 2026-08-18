@@ -92,7 +92,7 @@ pub struct Display<B: I2cDevice + I2cDeviceFactory = I2cBus> {
     logger: Option<Box<dyn Fn(&str) + Send + Sync>>,
 }
 
-impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
+impl Display<I2cBus> {
     /// 使用默认配置打开并初始化显示器。
     ///
     /// 等价于 `Display::open_config(DisplayConfig::new(bus_id, addr))`。
@@ -111,9 +111,9 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
         Self::open_config(DisplayConfig::new(bus_id, addr))
     }
 
-    /// 按配置打开并初始化显示器（通过 [`I2cDeviceFactory`] 打开底层设备）。
+    /// 按配置打开并初始化显示器（打开 /dev/i2c-N 并初始化控制器）。
     pub fn open_config(config: DisplayConfig) -> Result<Self, DriverError> {
-        let bus = B::open(config.bus_id, config.addr)?;
+        let bus = I2cBus::open(config.bus_id, config.addr)?;
         let driver = Ssd1309::init(bus, config.contrast, config.inverted, config.display_on)?;
         Ok(Self {
             driver: Some(driver),
@@ -126,7 +126,9 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
             logger: None,
         })
     }
+}
 
+impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     /// 使用已打开的 I2C 设备构造显示器（自定义总线 / 测试用）。
     pub fn from_device(device: B, config: DisplayConfig) -> Result<Self, DriverError> {
         let driver = Ssd1309::init(device, config.contrast, config.inverted, config.display_on)?;
@@ -380,14 +382,15 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
 mod tests {
     use super::*;
     use super::mock::{MockBus, Write};
-    use std::cell::{Cell, RefCell};
+    use std::cell::Cell;
     use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     /// 构造带共享日志与失败计数器的 MockBus。
-    fn new_bus() -> (Rc<RefCell<Vec<Write>>>, Rc<Cell<usize>>, MockBus) {
-        let log = Rc::new(RefCell::new(Vec::new()));
+    fn new_bus() -> (Arc<Mutex<Vec<Write>>>, Rc<Cell<usize>>, MockBus) {
+        let log = Arc::new(Mutex::new(Vec::new()));
         let failures = Rc::new(Cell::new(0));
-        let bus = MockBus::new(Rc::clone(&log), Rc::clone(&failures));
+        let bus = MockBus::new(Arc::clone(&log), Rc::clone(&failures));
         (log, failures, bus)
     }
 
@@ -429,7 +432,7 @@ mod tests {
             Display::<MockBus>::from_device(bus, DisplayConfig::new(1, 0x3C)).unwrap();
         failures.set(usize::MAX);
         // 工厂创建的总线也失败（init 即失败 → recover 失败）
-        MockBus::set_factory(Rc::new(RefCell::new(Vec::new())), usize::MAX);
+        MockBus::set_factory(Arc::new(Mutex::new(Vec::new())), usize::MAX);
         display.framebuffer.set_pixel(1, 1, true);
         assert_eq!(display.render_robust(), RenderStatus::Skipped);
         let s = display.stats();
@@ -447,13 +450,13 @@ mod tests {
         // 修改对比度与反色后触发恢复
         display.set_contrast(0x40).unwrap();
         display.set_inverted(true).unwrap();
-        let factory_log = Rc::new(RefCell::new(Vec::new()));
-        MockBus::set_factory(Rc::clone(&factory_log), 0);
+        let factory_log = Arc::new(Mutex::new(Vec::new()));
+        MockBus::set_factory(Arc::clone(&factory_log), 0);
         failures.set(usize::MAX);
         display.framebuffer.set_pixel(1, 1, true);
         assert_eq!(display.render_robust(), RenderStatus::Recovered);
         // 恢复时重新 init 应使用记忆的对比度与反色
-        let w = factory_log.borrow();
+        let w = factory_log.lock().unwrap();
         assert!(w.contains(&Write { control: 0x00, bytes: vec![0x81, 0x40] }));
         assert!(w.contains(&Write { control: 0x00, bytes: vec![0xA7] }));
     }
@@ -463,22 +466,29 @@ mod tests {
         let (log, _failures, bus) = new_bus();
         let mut display =
             Display::<MockBus>::from_device(bus, DisplayConfig::new(1, 0x3C)).unwrap();
-        let init_count = log.borrow().len();
+        let init_count = log.lock().unwrap().len();
 
         display.clear().unwrap();
-        let w = &log.borrow()[init_count..];
-        assert_eq!(w.len(), 24); // 8 页 × 3 写入
-        for page in 0..8 {
-            assert_eq!(w[page * 3], Write { control: 0x00, bytes: vec![0xB0 | page as u8] });
-            assert_eq!(w[page * 3 + 2].control, 0x40);
-            assert!(w[page * 3 + 2].bytes.iter().all(|&b| b == 0));
+        {
+            let guard = log.lock().unwrap();
+            let w = &guard[init_count..];
+            assert_eq!(w.len(), 24); // 8 页 × 3 写入
+            for page in 0..8u8 {
+                let p = page as usize * 3;
+                assert_eq!(w[p], Write { control: 0x00, bytes: vec![0xB0 | page] });
+                assert_eq!(w[p + 2].control, 0x40);
+                assert!(w[p + 2].bytes.iter().all(|&b| b == 0));
+            }
         }
 
-        let init_count2 = log.borrow().len();
+        let init_count2 = log.lock().unwrap().len();
         display.fill().unwrap();
-        let w2 = &log.borrow()[init_count2..];
-        for page in 0..8 {
-            assert!(w2[page * 3 + 2].bytes.iter().all(|&b| b == 0xFF));
+        {
+            let guard = log.lock().unwrap();
+            let w2 = &guard[init_count2..];
+            for page in 0..8u8 {
+                assert!(w2[page as usize * 3 + 2].bytes.iter().all(|&b| b == 0xFF));
+            }
         }
         assert_eq!(display.stats().frames_pushed, 2);
     }
@@ -488,25 +498,28 @@ mod tests {
         let (log, _failures, bus) = new_bus();
         let mut display =
             Display::<MockBus>::from_device(bus, DisplayConfig::new(1, 0x3C)).unwrap();
-        let init_count = log.borrow().len();
+        let init_count = log.lock().unwrap().len();
 
         // 无修改 → 空操作
         display.render_dirty().unwrap();
-        assert_eq!(log.borrow().len(), init_count);
+        assert_eq!(log.lock().unwrap().len(), init_count);
 
         // 修改一个像素 → 只推该像素所在页与列
         display.framebuffer.set_pixel(5, 5, true);
         display.render_dirty().unwrap();
-        let w = &log.borrow()[init_count..];
-        assert_eq!(w.len(), 3);
-        assert_eq!(w[0], Write { control: 0x00, bytes: vec![0xB0] }); // page0
-        assert_eq!(w[1], Write { control: 0x00, bytes: vec![0x05, 0x10] }); // 列 5
-        assert_eq!(w[2].control, 0x40);
-        assert_eq!(w[2].bytes, vec![0x20]); // (5,5) → bit5
+        {
+            let guard = log.lock().unwrap();
+            let w = &guard[init_count..];
+            assert_eq!(w.len(), 3);
+            assert_eq!(w[0], Write { control: 0x00, bytes: vec![0xB0] }); // page0
+            assert_eq!(w[1], Write { control: 0x00, bytes: vec![0x05, 0x10] }); // 列 5
+            assert_eq!(w[2].control, 0x40);
+            assert_eq!(w[2].bytes, vec![0x20]); // (5,5) → bit5
+        }
 
         // 推送后脏矩形已清空 → 再次 render_dirty 为空操作
         display.render_dirty().unwrap();
-        assert_eq!(log.borrow().len(), init_count + 3);
+        assert_eq!(log.lock().unwrap().len(), init_count + 3);
     }
 
     #[test]
@@ -514,16 +527,16 @@ mod tests {
         let (_log, failures, bus) = new_bus();
         let mut display =
             Display::<MockBus>::from_device(bus, DisplayConfig::new(1, 0x3C)).unwrap();
-        let messages = Rc::new(RefCell::new(Vec::new()));
+        let messages = Arc::new(Mutex::new(Vec::new()));
         {
-            let messages = Rc::clone(&messages);
-            display.set_logger(move |msg| messages.borrow_mut().push(msg.to_string()));
+            let messages = Arc::clone(&messages);
+            display.set_logger(move |msg| messages.lock().unwrap().push(msg.to_string()));
         }
         failures.set(usize::MAX);
         display.framebuffer.set_pixel(1, 1, true);
         let _ = display.render_robust();
-        assert!(!messages.borrow().is_empty());
+        assert!(!messages.lock().unwrap().is_empty());
         // 恢复成功后应记录成功日志
-        assert!(messages.borrow().iter().any(|m| m.contains("重置成功")));
+        assert!(messages.lock().unwrap().iter().any(|m| m.contains("重置成功")));
     }
 }
