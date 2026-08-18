@@ -2,6 +2,11 @@
 name = "i2c_display_driver"
 version = "0.1.0"
 edition = "2024"
+description = "面向 Linux I2C 子系统的 SSD1309 OLED 显示屏驱动库（128×64 单色）"
+license = "MIT"
+repository = "https://github.com/lztxwd666/SSD1309-I2C-Display-Driver"
+keywords = ["ssd1309", "oled", "i2c", "display", "driver", "linux"]
+categories = ["hardware-support", "embedded"]
 
 [dependencies]
 libc = "0.2"

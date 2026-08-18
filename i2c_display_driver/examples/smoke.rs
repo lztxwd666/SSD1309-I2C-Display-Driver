@@ -1,7 +1,7 @@
-//! 最小示例：初始化显示 → 绘制文字与基础图形 → 推帧。
+//! 冒烟测试：初始化显示 → 绘制文字与基础图形 → 推帧。
 //!
-//! 运行：cargo run --example hello
-//! 用于验证 I2C 通信、帧缓冲、文字、基础图形是否正常。
+//! 运行：cargo run --example smoke
+//! 用于快速验证 I2C 通信、帧缓冲、文字、基础图形是否正常。
 
 use i2c_display_driver::display::Display;
 use i2c_display_driver::graphics::{canvas, text};
@@ -28,6 +28,6 @@ fn main() -> Result<(), DriverError> {
     // 推帧到屏幕
     display.render()?;
 
-    println!("[示例] 已绘制并推帧，程序退出后屏幕保持显示");
+    println!("[冒烟测试] 已绘制并推帧，程序退出后屏幕保持显示");
     Ok(())
 }

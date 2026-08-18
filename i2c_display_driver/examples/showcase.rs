@@ -1,6 +1,6 @@
-//! 综合演示：循环展示文字、基础图形、日志/告警、反色与对比度。
+//! 全功能演示：循环展示文字、基础图形、日志/告警、反色与对比度。
 //!
-//! 运行：cargo run --example demo
+//! 运行：cargo run --example showcase
 //! 使用 render_robust() 推帧，演示自动恢复策略（Ctrl+C 停止）。
 
 use std::thread;

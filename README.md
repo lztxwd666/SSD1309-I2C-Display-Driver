@@ -5,11 +5,12 @@
 ## 当前能力
 
 - **I2C 底层封装**：`/dev/i2c-N` + `ioctl(I2C_SLAVE)` 绑定从机地址，命令（0x00）/ 数据（0x40）分通道写入
-- **SSD1309 控制器驱动**：初始化、逐页推帧、对比度、反色、休眠 / 唤醒、总线恢复
-- **1-bit 帧缓冲**：1024 字节（8 页 × 128 列），实现 embedded-graphics `DrawTarget`
+- **SSD1309 控制器驱动**：可配置初始化（`DisplayConfig`）、逐页/局部推帧、对比度、反色、全屏点亮测试、休眠 / 唤醒、硬件滚动、总线恢复
+- **1-bit 帧缓冲**：1024 字节（8 页 × 128 列），实现 embedded-graphics `DrawTarget`，自动脏矩形跟踪（`render_dirty()` 只推变化区域）
 - **文字渲染**：5×7 字体，支持反色 / 紧凑模式
 - **基础图形**：矩形、直线、圆、三角形（含填充与点线）
-- **稳定显示**：`render_robust()` 自动恢复、逐页推帧避开 Pi 5 RP1 大块传输限制、栈缓冲区零堆分配
+- **稳定显示**：`render_robust()` 自动恢复、恢复后沿用对比度/反色设置、逐页推帧避开 Pi 5 RP1 大块传输限制、栈缓冲区零堆分配
+- **可观测性**：运行统计（帧数 / 错误数 / 恢复次数）、日志回调（默认 stderr）
 
 ## 硬件
 
@@ -49,6 +50,19 @@ canvas::fill_circle(&mut display.framebuffer, 100, 40, 10);
 display.render()?;
 ```
 
+局部推帧（只推送变化区域）与硬件滚动：
+
+```rust
+// 只推送脏矩形区域（帧缓冲自动跟踪修改）
+display.framebuffer.set_pixel(20, 20, true);
+display.render_dirty()?;
+
+// 水平滚动（设置后需 activate_scroll 生效）
+use i2c_display_driver::display::{ScrollDirection, ScrollFrameInterval};
+display.scroll_horizontal(ScrollDirection::Right, 0, 3, ScrollFrameInterval::Frames5)?;
+display.activate_scroll()?;
+```
+
 帧缓冲实现了 `embedded_graphics::DrawTarget`，也可直接绘制原语：
 
 ```rust
@@ -67,9 +81,9 @@ Rectangle::new(Point::new(0, 0), Size::new(20, 20))
 lib.rs ── pub mod display; pub mod error; pub mod graphics;
 ├── display/
 │   ├── i2c_bus.rs      I2C 底层封装（ioctl 从机地址 + write）
-│   ├── ssd1309.rs      SSD1309 控制器驱动（init / push_frame / set_contrast / sleep / wake / set_inverted）
-│   ├── framebuffer.rs  1-bit 帧缓冲（embedded-graphics DrawTarget）
-│   └── mod.rs          Display 顶层句柄（open / render / render_robust / recover）
+│   ├── ssd1309.rs      SSD1309 控制器驱动（init / push_frame / render_region / 滚动 / 全屏点亮）
+│   ├── framebuffer.rs  1-bit 帧缓冲（embedded-graphics DrawTarget + 脏矩形）
+│   └── mod.rs          Display 顶层句柄（open_config / render* / recover / scroll / stats）
 ├── graphics/
 │   ├── font.rs         5×7 位图字体
 │   ├── text.rs         文字渲染
@@ -77,7 +91,7 @@ lib.rs ── pub mod display; pub mod error; pub mod graphics;
 └── error.rs            DriverError 统一错误类型
 ```
 
-公开 API：`display::Display`、`display::Framebuffer`、`graphics::{text, canvas, font}`、`DriverError`。
+公开 API：`display::Display`、`display::DisplayConfig`、`display::Framebuffer`、`display::{RenderStatus, DriverStats, ScrollDirection, ScrollFrameInterval}`、`graphics::{text, canvas, font}`、`DriverError`。
 
 ## 依赖
 
@@ -100,9 +114,9 @@ cargo clippy       # 静态检查
 ## 示例
 
 ```bash
-cargo run --example hello   # 最小示例：文字 + 图形 + 推帧
-cargo run --example demo    # 综合演示：循环展示文字 / 图形 / 日志 / 反色 / 对比度
+cargo run --example smoke      # 冒烟测试：文字 + 图形 + 推帧
+cargo run --example showcase   # 全功能演示：循环展示文字 / 图形 / 日志 / 反色 / 对比度
 ```
 
-- `examples/hello.rs` 验证基本链路（I2C → 帧缓冲 → 文字 / 图形 → 推帧）
-- `examples/demo.rs` 循环展示全部功能，含 `render_robust()` 自动恢复演示
+- `examples/smoke.rs` 验证基本链路（I2C → 帧缓冲 → 文字 / 图形 → 推帧）
+- `examples/showcase.rs` 循环展示全部功能，含 `render_robust()` 自动恢复演示
