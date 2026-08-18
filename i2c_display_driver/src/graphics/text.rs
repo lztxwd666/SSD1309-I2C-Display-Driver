@@ -23,22 +23,18 @@ pub fn draw_text_inverted(fb: &mut Framebuffer, x: usize, y: usize, text: &str) 
     draw_impl(fb, x, y, text, 1, DrawMode::Clear);
 }
 
-fn draw_impl(
-    fb: &mut Framebuffer,
-    x: usize,
-    y: usize,
-    text: &str,
-    gap: usize,
-    mode: DrawMode,
-) {
+fn draw_impl(fb: &mut Framebuffer, x: usize, y: usize, text: &str, gap: usize, mode: DrawMode) {
     let mut cx = x;
+    let mut cy = y;
     for ch in text.chars() {
         if ch == '\n' {
+            // 换行：回到行首，下一行下移一行（字符高度 + 1px 行距）
             cx = x;
+            cy += font::CHAR_HEIGHT + 1;
             continue;
         }
-        // 字符完全在屏幕右侧之外 → 整行提前退出
-        if cx >= 128 {
+        // 整行已超出屏幕下方或右侧 → 提前退出
+        if cy >= 64 || cx >= 128 {
             break;
         }
         let glyph = font::glyph(ch);
@@ -48,7 +44,7 @@ fn draw_impl(
                 break;
             }
             for bit in 0..font::CHAR_HEIGHT {
-                let py = y + bit;
+                let py = cy + bit;
                 if py >= 64 {
                     break;
                 }
@@ -62,10 +58,13 @@ fn draw_impl(
     }
 }
 
-/// 估算文本像素宽度（5×7）。
+/// 估算文本像素宽度（5×7）：多行取最长一行。
 #[inline]
 pub fn text_width(text: &str, gap: usize) -> usize {
-    text.chars().count() * (font::CHAR_WIDTH + gap)
+    text.lines()
+        .map(|line| line.chars().count() * (font::CHAR_WIDTH + gap))
+        .max()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -105,5 +104,23 @@ mod tests {
     fn oob_no_panic() {
         let mut fb = Framebuffer::new();
         draw_text(&mut fb, 200, 200, "X");
+    }
+
+    #[test]
+    fn newline_advances_row() {
+        let mut fb = Framebuffer::new();
+        draw_text(&mut fb, 0, 0, "A\nB");
+        // 'B' 在第二行：y = 0 + 7 + 1 = 8。'B' 字形第一列 0x7F 的 bit0 点亮 (0,8)。
+        assert!(fb.get_pixel(0, 8));
+        // 无换行时同一位置应无像素
+        let mut fb2 = Framebuffer::new();
+        draw_text(&mut fb2, 0, 0, "AB");
+        assert!(!fb2.get_pixel(0, 8));
+    }
+
+    #[test]
+    fn text_width_takes_wide_line() {
+        assert_eq!(text_width("AB\nCDE", 0), 5 * 3); // 最长行 "CDE"
+        assert_eq!(text_width("", 1), 0);
     }
 }

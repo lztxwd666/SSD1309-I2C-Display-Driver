@@ -202,7 +202,7 @@ fn plot8(fb: &mut Framebuffer, cx: i32, cy: i32, x: i32, y: i32) {
 /// 在 y 行填充 [x0, x1] 区间（越界裁剪）。
 #[inline]
 fn fill_row(fb: &mut Framebuffer, x0: i32, x1: i32, y: i32) {
-    if y < 0 || y >= 64 {
+    if !(0..64).contains(&y) {
         return;
     }
     let x0 = x0.max(0) as usize;

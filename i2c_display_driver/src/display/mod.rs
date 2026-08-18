@@ -68,6 +68,9 @@ pub struct DriverStats {
     pub errors: u64,
 }
 
+/// 驱动日志回调类型。
+type LogCallback = Box<dyn Fn(&str) + Send + Sync>;
+
 /// OLED 显示器顶层句柄。
 ///
 /// 泛型参数 `B` 为底层 I2C 设备，默认为 [`I2cBus`]（Linux `/dev/i2c-N`）。
@@ -89,7 +92,7 @@ pub struct Display<B: I2cDevice + I2cDeviceFactory = I2cBus> {
     /// 运行统计。
     stats: DriverStats,
     /// 日志回调；未设置时默认输出到 stderr。
-    logger: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    logger: Option<LogCallback>,
 }
 
 impl Display<I2cBus> {
@@ -193,7 +196,17 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
         match result {
             Ok(()) => {
                 self.stats.frames_pushed += 1;
-                self.framebuffer.clear_dirty();
+                // 脏矩形仅当本次推送完全覆盖时才清除：未覆盖部分保留，
+                // 避免局部推帧后未推送区域的更新永久丢失。
+                let covered = self
+                    .framebuffer
+                    .dirty_rect()
+                    .is_some_and(|(dx, dy, dw, dh)| {
+                        x <= dx && y <= dy && x + w >= dx + dw && y + h >= dy + dh
+                    });
+                if covered {
+                    self.framebuffer.clear_dirty();
+                }
                 Ok(())
             }
             Err(e) => {
@@ -380,14 +393,17 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::mock::{MockBus, Write};
+    use super::*;
     use std::cell::Cell;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
+    /// 共享句柄：写入日志 + 失败计数器 + 总线。
+    type SharedBus = (Arc<Mutex<Vec<Write>>>, Rc<Cell<usize>>, MockBus);
+
     /// 构造带共享日志与失败计数器的 MockBus。
-    fn new_bus() -> (Arc<Mutex<Vec<Write>>>, Rc<Cell<usize>>, MockBus) {
+    fn new_bus() -> SharedBus {
         let log = Arc::new(Mutex::new(Vec::new()));
         let failures = Rc::new(Cell::new(0));
         let bus = MockBus::new(Arc::clone(&log), Rc::clone(&failures));
@@ -457,8 +473,14 @@ mod tests {
         assert_eq!(display.render_robust(), RenderStatus::Recovered);
         // 恢复时重新 init 应使用记忆的对比度与反色
         let w = factory_log.lock().unwrap();
-        assert!(w.contains(&Write { control: 0x00, bytes: vec![0x81, 0x40] }));
-        assert!(w.contains(&Write { control: 0x00, bytes: vec![0xA7] }));
+        assert!(w.contains(&Write {
+            control: 0x00,
+            bytes: vec![0x81, 0x40]
+        }));
+        assert!(w.contains(&Write {
+            control: 0x00,
+            bytes: vec![0xA7]
+        }));
     }
 
     #[test]
@@ -475,7 +497,13 @@ mod tests {
             assert_eq!(w.len(), 24); // 8 页 × 3 写入
             for page in 0..8u8 {
                 let p = page as usize * 3;
-                assert_eq!(w[p], Write { control: 0x00, bytes: vec![0xB0 | page] });
+                assert_eq!(
+                    w[p],
+                    Write {
+                        control: 0x00,
+                        bytes: vec![0xB0 | page]
+                    }
+                );
                 assert_eq!(w[p + 2].control, 0x40);
                 assert!(w[p + 2].bytes.iter().all(|&b| b == 0));
             }
@@ -511,8 +539,20 @@ mod tests {
             let guard = log.lock().unwrap();
             let w = &guard[init_count..];
             assert_eq!(w.len(), 3);
-            assert_eq!(w[0], Write { control: 0x00, bytes: vec![0xB0] }); // page0
-            assert_eq!(w[1], Write { control: 0x00, bytes: vec![0x05, 0x10] }); // 列 5
+            assert_eq!(
+                w[0],
+                Write {
+                    control: 0x00,
+                    bytes: vec![0xB0]
+                }
+            ); // page0
+            assert_eq!(
+                w[1],
+                Write {
+                    control: 0x00,
+                    bytes: vec![0x05, 0x10]
+                }
+            ); // 列 5
             assert_eq!(w[2].control, 0x40);
             assert_eq!(w[2].bytes, vec![0x20]); // (5,5) → bit5
         }
@@ -520,6 +560,27 @@ mod tests {
         // 推送后脏矩形已清空 → 再次 render_dirty 为空操作
         display.render_dirty().unwrap();
         assert_eq!(log.lock().unwrap().len(), init_count + 3);
+    }
+
+    #[test]
+    fn render_region_keeps_uncovered_dirty_area() {
+        let (log, _failures, bus) = new_bus();
+        let mut display =
+            Display::<MockBus>::from_device(bus, DisplayConfig::new(1, 0x3C)).unwrap();
+
+        // 修改两个远离的区域：左上角 (5,5) 和右下角 (100,60)
+        display.framebuffer.set_pixel(5, 5, true);
+        display.framebuffer.set_pixel(100, 60, true);
+        assert_eq!(display.framebuffer.dirty_rect(), Some((5, 5, 96, 56)));
+
+        // 只推送左上角区域 → 右下角更新必须保留在脏矩形中
+        display.render_region(0, 0, 20, 20).unwrap();
+        assert_eq!(display.framebuffer.dirty_rect(), Some((5, 5, 96, 56)));
+
+        // 推送覆盖整个脏矩形的区域 → 才清除
+        display.render_region(0, 0, 128, 64).unwrap();
+        assert_eq!(display.framebuffer.dirty_rect(), None);
+        let _ = log;
     }
 
     #[test]
@@ -537,6 +598,12 @@ mod tests {
         let _ = display.render_robust();
         assert!(!messages.lock().unwrap().is_empty());
         // 恢复成功后应记录成功日志
-        assert!(messages.lock().unwrap().iter().any(|m| m.contains("重置成功")));
+        assert!(
+            messages
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m.contains("重置成功"))
+        );
     }
 }

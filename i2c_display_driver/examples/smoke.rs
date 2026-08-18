@@ -3,9 +3,9 @@
 //! 运行：cargo run --example smoke
 //! 用于快速验证 I2C 通信、帧缓冲、文字、基础图形是否正常。
 
+use i2c_display_driver::DriverError;
 use i2c_display_driver::display::Display;
 use i2c_display_driver::graphics::{canvas, text};
-use i2c_display_driver::DriverError;
 
 fn main() -> Result<(), DriverError> {
     // I2C 总线 1，SSD1309 地址 0x3C

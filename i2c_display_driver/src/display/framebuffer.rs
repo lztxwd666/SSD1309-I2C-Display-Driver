@@ -103,7 +103,8 @@ impl Framebuffer {
     /// 无修改时返回 `None`。注意：直接修改 `buffer` 字段不会更新脏矩形，
     /// 请通过 `set_pixel` / embedded-graphics 绘制接口修改。
     pub fn dirty_rect(&self) -> Option<(usize, usize, usize, usize)> {
-        self.dirty.map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0, y1 - y0))
+        self.dirty
+            .map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0, y1 - y0))
     }
 
     /// 清除脏矩形记录。

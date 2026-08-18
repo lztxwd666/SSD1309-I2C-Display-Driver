@@ -5,8 +5,9 @@
 //!
 //! 工厂状态使用 `thread_local`：每个测试线程独立，并行运行互不干扰。
 
-use std::cell::{Cell, Rc, RefCell};
+use std::cell::{Cell, RefCell};
 use std::io;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use super::i2c_bus::{I2cDevice, I2cDeviceFactory};
@@ -20,10 +21,13 @@ pub(crate) struct Write {
     pub bytes: Vec<u8>,
 }
 
+/// 工厂状态：下次 open 使用的日志句柄与失败次数。
+type FactoryState = Option<(Arc<Mutex<Vec<Write>>>, usize)>;
+
 thread_local! {
     /// 工厂状态（线程本地）：下次 open 使用的日志句柄与失败次数。
     /// 仅用于恢复流程测试（工厂创建的总线默认使用独立新日志）。
-    static FACTORY: RefCell<Option<(Arc<Mutex<Vec<Write>>>, usize)>> = const { RefCell::new(None) };
+    static FACTORY: RefCell<FactoryState> = const { RefCell::new(None) };
 }
 
 /// 记录型 Mock I2C 总线。
@@ -48,7 +52,7 @@ impl MockBus {
         let n = self.failures.get();
         if n > 0 {
             self.failures.set(n - 1);
-            return Err(io::Error::new(io::ErrorKind::Other, "mock: 模拟 I2C 写入失败"));
+            return Err(io::Error::other("mock: 模拟 I2C 写入失败"));
         }
         self.log.lock().unwrap().push(Write {
             control,

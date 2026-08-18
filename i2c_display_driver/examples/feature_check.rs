@@ -10,9 +10,9 @@
 use std::thread;
 use std::time::Duration;
 
+use i2c_display_driver::DriverError;
 use i2c_display_driver::display::{Display, ScrollDirection, ScrollFrameInterval};
 use i2c_display_driver::graphics::text;
-use i2c_display_driver::DriverError;
 
 fn pause(ms: u64) {
     thread::sleep(Duration::from_millis(ms));
@@ -47,11 +47,17 @@ fn main() -> Result<(), DriverError> {
     // ── 3. render_dirty() 局部推帧（只推送变化区域）──
     println!("[3/6] render_dirty() 局部推帧");
     text::draw_text(&mut display.framebuffer, 0, 0, "PARTIAL UPDATE");
-    println!("  脏矩形（应只覆盖文字区域）: {:?}", display.framebuffer.dirty_rect());
+    println!(
+        "  脏矩形（应只覆盖文字区域）: {:?}",
+        display.framebuffer.dirty_rect()
+    );
     display.render_dirty()?;
     pause(2000);
     text::draw_text(&mut display.framebuffer, 0, 12, "dirty rect OK");
-    println!("  追加一行后的脏矩形: {:?}", display.framebuffer.dirty_rect());
+    println!(
+        "  追加一行后的脏矩形: {:?}",
+        display.framebuffer.dirty_rect()
+    );
     display.render_dirty()?;
     pause(2000);
 
@@ -81,8 +87,10 @@ fn main() -> Result<(), DriverError> {
 
     let s = display.stats();
     println!("\n=== 统计（预期：推帧数 6，其余为 0）===");
-    println!("  推帧数: {}，跳过帧: {}，恢复次数: {}，错误: {}",
-        s.frames_pushed, s.frames_skipped, s.recoveries, s.errors);
+    println!(
+        "  推帧数: {}，跳过帧: {}，恢复次数: {}，错误: {}",
+        s.frames_pushed, s.frames_skipped, s.recoveries, s.errors
+    );
     println!("\n验证结束，屏幕保持显示 FEATURES OK");
     Ok(())
 }

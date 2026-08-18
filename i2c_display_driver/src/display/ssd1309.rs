@@ -42,12 +42,7 @@ pub struct Ssd1309<B: I2cDevice> {
 impl<B: I2cDevice> Ssd1309<B> {
     /// 初始化控制器。`contrast` 初始对比度、`inverted` 初始反色、
     /// `display_on` 初始化完成后是否立即开启显示。
-    pub fn init(
-        mut bus: B,
-        contrast: u8,
-        inverted: bool,
-        display_on: bool,
-    ) -> io::Result<Self> {
+    pub fn init(mut bus: B, contrast: u8, inverted: bool, display_on: bool) -> io::Result<Self> {
         bus.write_command(&[0xAE])?; // 关闭显示（休眠模式）
         bus.write_command(&[0xD5, 0x80])?; // 时钟分频/振荡器频率
         bus.write_command(&[0xA8, 0x3F])?; // 多路复用比 64（128×64 面板）
@@ -77,7 +72,8 @@ impl<B: I2cDevice> Ssd1309<B> {
         for page in 0..(HEIGHT / 8) as u8 {
             self.bus.write_command(&[0xB0 | page])?;
             self.bus.write_command(&[0x00, 0x10])?;
-            self.bus.write_data(&data[page as usize * WIDTH..][..WIDTH])?;
+            self.bus
+                .write_data(&data[page as usize * WIDTH..][..WIDTH])?;
         }
         Ok(())
     }
@@ -109,7 +105,7 @@ impl<B: I2cDevice> Ssd1309<B> {
         let data = fb.as_bytes();
         for page in page0..=page1 {
             self.bus.write_command(&[0xB0 | page as u8])?;
-            let col_low = 0x00 | (x as u8 & 0x0F);
+            let col_low = x as u8 & 0x0F;
             let col_high = 0x10 | ((x as u8 >> 4) & 0x07);
             self.bus.write_command(&[col_low, col_high])?;
             self.bus.write_data(&data[page * WIDTH + x..][..w])?;
@@ -253,23 +249,125 @@ mod tests {
         let (log, bus) = mock_bus();
         Ssd1309::init(bus, 0xCF, false, true).unwrap();
         let w = log.lock().unwrap();
-        assert_eq!(w[0], Write { control: 0x00, bytes: vec![0xAE] });
-        assert_eq!(w[1], Write { control: 0x00, bytes: vec![0xD5, 0x80] });
-        assert_eq!(w[2], Write { control: 0x00, bytes: vec![0xA8, 0x3F] });
-        assert_eq!(w[3], Write { control: 0x00, bytes: vec![0xD3, 0x00] });
-        assert_eq!(w[4], Write { control: 0x00, bytes: vec![0x40] });
-        assert_eq!(w[5], Write { control: 0x00, bytes: vec![0x8D, 0x14] });
-        assert_eq!(w[6], Write { control: 0x00, bytes: vec![0xAD, 0x8A] }); // SSD1309 DC-DC
-        assert_eq!(w[7], Write { control: 0x00, bytes: vec![0x20, 0x02] }); // 页寻址
-        assert_eq!(w[8], Write { control: 0x00, bytes: vec![0xA1] });
-        assert_eq!(w[9], Write { control: 0x00, bytes: vec![0xC8] });
-        assert_eq!(w[10], Write { control: 0x00, bytes: vec![0xDA, 0x12] });
-        assert_eq!(w[11], Write { control: 0x00, bytes: vec![0x81, 0xCF] }); // 对比度
-        assert_eq!(w[12], Write { control: 0x00, bytes: vec![0xD9, 0xF1] });
-        assert_eq!(w[13], Write { control: 0x00, bytes: vec![0xDB, 0x40] });
-        assert_eq!(w[14], Write { control: 0x00, bytes: vec![0xA4] });
-        assert_eq!(w[15], Write { control: 0x00, bytes: vec![0xA6] }); // 非反色
-        assert_eq!(w[16], Write { control: 0x00, bytes: vec![0xAF] }); // 开启显示
+        assert_eq!(
+            w[0],
+            Write {
+                control: 0x00,
+                bytes: vec![0xAE]
+            }
+        );
+        assert_eq!(
+            w[1],
+            Write {
+                control: 0x00,
+                bytes: vec![0xD5, 0x80]
+            }
+        );
+        assert_eq!(
+            w[2],
+            Write {
+                control: 0x00,
+                bytes: vec![0xA8, 0x3F]
+            }
+        );
+        assert_eq!(
+            w[3],
+            Write {
+                control: 0x00,
+                bytes: vec![0xD3, 0x00]
+            }
+        );
+        assert_eq!(
+            w[4],
+            Write {
+                control: 0x00,
+                bytes: vec![0x40]
+            }
+        );
+        assert_eq!(
+            w[5],
+            Write {
+                control: 0x00,
+                bytes: vec![0x8D, 0x14]
+            }
+        );
+        assert_eq!(
+            w[6],
+            Write {
+                control: 0x00,
+                bytes: vec![0xAD, 0x8A]
+            }
+        ); // SSD1309 DC-DC
+        assert_eq!(
+            w[7],
+            Write {
+                control: 0x00,
+                bytes: vec![0x20, 0x02]
+            }
+        ); // 页寻址
+        assert_eq!(
+            w[8],
+            Write {
+                control: 0x00,
+                bytes: vec![0xA1]
+            }
+        );
+        assert_eq!(
+            w[9],
+            Write {
+                control: 0x00,
+                bytes: vec![0xC8]
+            }
+        );
+        assert_eq!(
+            w[10],
+            Write {
+                control: 0x00,
+                bytes: vec![0xDA, 0x12]
+            }
+        );
+        assert_eq!(
+            w[11],
+            Write {
+                control: 0x00,
+                bytes: vec![0x81, 0xCF]
+            }
+        ); // 对比度
+        assert_eq!(
+            w[12],
+            Write {
+                control: 0x00,
+                bytes: vec![0xD9, 0xF1]
+            }
+        );
+        assert_eq!(
+            w[13],
+            Write {
+                control: 0x00,
+                bytes: vec![0xDB, 0x40]
+            }
+        );
+        assert_eq!(
+            w[14],
+            Write {
+                control: 0x00,
+                bytes: vec![0xA4]
+            }
+        );
+        assert_eq!(
+            w[15],
+            Write {
+                control: 0x00,
+                bytes: vec![0xA6]
+            }
+        ); // 非反色
+        assert_eq!(
+            w[16],
+            Write {
+                control: 0x00,
+                bytes: vec![0xAF]
+            }
+        ); // 开启显示
         assert_eq!(w.len(), 17);
     }
 
@@ -279,10 +377,22 @@ mod tests {
         let (log, bus) = mock_bus();
         Ssd1309::init(bus, 0x40, true, false).unwrap();
         let w = log.lock().unwrap();
-        assert!(w.contains(&Write { control: 0x00, bytes: vec![0x81, 0x40] }));
-        assert!(w.contains(&Write { control: 0x00, bytes: vec![0xA7] }));
+        assert!(w.contains(&Write {
+            control: 0x00,
+            bytes: vec![0x81, 0x40]
+        }));
+        assert!(w.contains(&Write {
+            control: 0x00,
+            bytes: vec![0xA7]
+        }));
         // 最后一条不应是 0xAF（display_on=false）
-        assert_ne!(w.last().unwrap(), &Write { control: 0x00, bytes: vec![0xAF] });
+        assert_ne!(
+            w.last().unwrap(),
+            &Write {
+                control: 0x00,
+                bytes: vec![0xAF]
+            }
+        );
     }
 
     #[test]
@@ -301,13 +411,25 @@ mod tests {
         assert_eq!(w.len(), 24);
         for page in 0..8u8 {
             let p = page as usize * 3;
-            assert_eq!(w[p], Write { control: 0x00, bytes: vec![0xB0 | page] });
-            assert_eq!(w[p + 1], Write { control: 0x00, bytes: vec![0x00, 0x10] });
+            assert_eq!(
+                w[p],
+                Write {
+                    control: 0x00,
+                    bytes: vec![0xB0 | page]
+                }
+            );
+            assert_eq!(
+                w[p + 1],
+                Write {
+                    control: 0x00,
+                    bytes: vec![0x00, 0x10]
+                }
+            );
             assert_eq!(w[p + 2].control, 0x40);
             assert_eq!(w[p + 2].bytes.len(), WIDTH);
         }
-        // 校验数据内容
-        assert_eq!(w[0].bytes[0], 0x01); // (0,0) bit0
+        // 校验数据内容（w[2] 为 page0 的数据写入：页命令 + 列命令 + 数据）
+        assert_eq!(w[2].bytes[0], 0x01); // (0,0) bit0
         assert_eq!(w[7 * 3 + 2].bytes[127], 0x80); // (127,63) bit7
     }
 
@@ -325,13 +447,37 @@ mod tests {
         let w = writes_after_init(&log, init_count);
         assert_eq!(w.len(), 6); // 2 页 × 3 写入
         // page0：列地址 10（低 0x0A，高 0x10）
-        assert_eq!(w[0], Write { control: 0x00, bytes: vec![0xB0] });
-        assert_eq!(w[1], Write { control: 0x00, bytes: vec![0x0A, 0x10] });
+        assert_eq!(
+            w[0],
+            Write {
+                control: 0x00,
+                bytes: vec![0xB0]
+            }
+        );
+        assert_eq!(
+            w[1],
+            Write {
+                control: 0x00,
+                bytes: vec![0x0A, 0x10]
+            }
+        );
         assert_eq!(w[2].control, 0x40);
         assert_eq!(w[2].bytes.len(), 20);
         // page1
-        assert_eq!(w[3], Write { control: 0x00, bytes: vec![0xB1] });
-        assert_eq!(w[4], Write { control: 0x00, bytes: vec![0x0A, 0x10] });
+        assert_eq!(
+            w[3],
+            Write {
+                control: 0x00,
+                bytes: vec![0xB1]
+            }
+        );
+        assert_eq!(
+            w[4],
+            Write {
+                control: 0x00,
+                bytes: vec![0x0A, 0x10]
+            }
+        );
         assert_eq!(w[5].control, 0x40);
         assert_eq!(w[5].bytes.len(), 20);
     }
@@ -356,28 +502,84 @@ mod tests {
         let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
         let init_count = log.lock().unwrap().len();
 
-        ssd.scroll_horizontal(ScrollDirection::Right, 0, 3, ScrollFrameInterval::Frames5).unwrap();
-        ssd.scroll_vertical_horizontal(ScrollDirection::Left, 1, 5, ScrollFrameInterval::Frames64, 10).unwrap();
+        ssd.scroll_horizontal(ScrollDirection::Right, 0, 3, ScrollFrameInterval::Frames5)
+            .unwrap();
+        ssd.scroll_vertical_horizontal(
+            ScrollDirection::Left,
+            1,
+            5,
+            ScrollFrameInterval::Frames64,
+            10,
+        )
+        .unwrap();
         ssd.set_vertical_scroll_area(0, 64).unwrap();
         ssd.activate_scroll().unwrap();
         ssd.deactivate_scroll().unwrap();
 
         let w = writes_after_init(&log, init_count);
-        assert_eq!(w[0], Write { control: 0x00, bytes: vec![0x26, 0x00, 0x00, 0x00, 0x03, 0x00, 0xFF] });
-        assert_eq!(w[1], Write { control: 0x00, bytes: vec![0x2A, 0x00, 0x01, 0x01, 0x05, 0x0A, 0x00, 0xFF] });
-        assert_eq!(w[2], Write { control: 0x00, bytes: vec![0xA3, 0x00, 0x40] });
-        assert_eq!(w[3], Write { control: 0x00, bytes: vec![0x2F] });
-        assert_eq!(w[4], Write { control: 0x00, bytes: vec![0x2E] });
+        assert_eq!(
+            w[0],
+            Write {
+                control: 0x00,
+                bytes: vec![0x26, 0x00, 0x00, 0x00, 0x03, 0x00, 0xFF]
+            }
+        );
+        assert_eq!(
+            w[1],
+            Write {
+                control: 0x00,
+                bytes: vec![0x2A, 0x00, 0x01, 0x01, 0x05, 0x0A, 0x00, 0xFF]
+            }
+        );
+        assert_eq!(
+            w[2],
+            Write {
+                control: 0x00,
+                bytes: vec![0xA3, 0x00, 0x40]
+            }
+        );
+        assert_eq!(
+            w[3],
+            Write {
+                control: 0x00,
+                bytes: vec![0x2F]
+            }
+        );
+        assert_eq!(
+            w[4],
+            Write {
+                control: 0x00,
+                bytes: vec![0x2E]
+            }
+        );
     }
 
     #[test]
     fn scroll_rejects_invalid_pages() {
         let (log, bus) = mock_bus();
         let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
-        assert!(ssd.scroll_horizontal(ScrollDirection::Right, 8, 3, ScrollFrameInterval::Frames5).is_err());
-        assert!(ssd.scroll_horizontal(ScrollDirection::Right, 0, 9, ScrollFrameInterval::Frames5).is_err());
-        assert!(ssd.scroll_horizontal(ScrollDirection::Right, 3, 2, ScrollFrameInterval::Frames5).is_err());
-        assert!(ssd.scroll_vertical_horizontal(ScrollDirection::Right, 0, 1, ScrollFrameInterval::Frames5, 64).is_err());
+        assert!(
+            ssd.scroll_horizontal(ScrollDirection::Right, 8, 3, ScrollFrameInterval::Frames5)
+                .is_err()
+        );
+        assert!(
+            ssd.scroll_horizontal(ScrollDirection::Right, 0, 9, ScrollFrameInterval::Frames5)
+                .is_err()
+        );
+        assert!(
+            ssd.scroll_horizontal(ScrollDirection::Right, 3, 2, ScrollFrameInterval::Frames5)
+                .is_err()
+        );
+        assert!(
+            ssd.scroll_vertical_horizontal(
+                ScrollDirection::Right,
+                0,
+                1,
+                ScrollFrameInterval::Frames5,
+                64
+            )
+            .is_err()
+        );
         let _ = log;
     }
 
@@ -396,12 +598,54 @@ mod tests {
         ssd.wake().unwrap();
 
         let w = writes_after_init(&log, init_count);
-        assert_eq!(w[0], Write { control: 0x00, bytes: vec![0x81, 0x40] });
-        assert_eq!(w[1], Write { control: 0x00, bytes: vec![0xA7] });
-        assert_eq!(w[2], Write { control: 0x00, bytes: vec![0xA6] });
-        assert_eq!(w[3], Write { control: 0x00, bytes: vec![0xA5] });
-        assert_eq!(w[4], Write { control: 0x00, bytes: vec![0xA4] });
-        assert_eq!(w[5], Write { control: 0x00, bytes: vec![0xAE] });
-        assert_eq!(w[6], Write { control: 0x00, bytes: vec![0xAF] });
+        assert_eq!(
+            w[0],
+            Write {
+                control: 0x00,
+                bytes: vec![0x81, 0x40]
+            }
+        );
+        assert_eq!(
+            w[1],
+            Write {
+                control: 0x00,
+                bytes: vec![0xA7]
+            }
+        );
+        assert_eq!(
+            w[2],
+            Write {
+                control: 0x00,
+                bytes: vec![0xA6]
+            }
+        );
+        assert_eq!(
+            w[3],
+            Write {
+                control: 0x00,
+                bytes: vec![0xA5]
+            }
+        );
+        assert_eq!(
+            w[4],
+            Write {
+                control: 0x00,
+                bytes: vec![0xA4]
+            }
+        );
+        assert_eq!(
+            w[5],
+            Write {
+                control: 0x00,
+                bytes: vec![0xAE]
+            }
+        );
+        assert_eq!(
+            w[6],
+            Write {
+                control: 0x00,
+                bytes: vec![0xAF]
+            }
+        );
     }
 }
