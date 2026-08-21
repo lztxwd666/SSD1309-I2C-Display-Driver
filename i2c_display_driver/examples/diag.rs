@@ -37,8 +37,10 @@ fn main() -> Result<(), DriverError> {
     pause(8000);
 
     // 2. 局部推第一行（page0）
+    // 先通过 display.clear() 清屏并推帧，确保脏矩形已清空；
+    // 再绘制第一行，render_dirty() 才会只推送 page0。
     println!("[2/6] render_dirty() 只推第一行（page0），观察 6 秒");
-    display.framebuffer.clear();
+    display.clear()?;
     text::draw_text(&mut display.framebuffer, 0, 0, "DIRTY PAGE0");
     println!("      脏矩形: {:?}", display.framebuffer.dirty_rect());
     display.render_dirty()?;

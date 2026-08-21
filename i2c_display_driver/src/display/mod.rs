@@ -9,7 +9,7 @@ mod ssd1309;
 #[cfg(test)]
 mod mock;
 
-pub use framebuffer::{BlitMode, Framebuffer, HEIGHT, PageBuffer, WIDTH};
+pub use framebuffer::{BlitError, BlitMode, Framebuffer, HEIGHT, PageBuffer, WIDTH};
 pub use i2c_bus::{I2cBus, I2cDevice, I2cDeviceFactory};
 pub use ssd1309::Ssd1309;
 
@@ -102,8 +102,9 @@ type LogCallback = Box<dyn Fn(&str) + Send + Sync>;
 /// 泛型参数 `B` 为底层 I2C 设备，默认为 [`I2cBus`]（Linux `/dev/i2c-N`）。
 /// 可通过 [`I2cDevice`] trait 注入自定义总线（测试用 Mock 总线等）。
 ///
-/// 线程安全：`Display` 是 `Send`（可跨线程移动），但不是 `Sync`，
-/// 多线程共享同一实例需要外部互斥（如 `Mutex<Display>`）。
+/// 线程安全：`Display` 是否 `Send`/`Sync` 取决于底层 `B`；默认 `I2cBus`
+/// 同时满足 `Send + Sync`。由于修改接口都是 `&mut self`，跨线程共享同一
+/// 实例仍需要外部互斥（如 `Mutex<Display>`）。
 pub struct Display<B: I2cDevice + I2cDeviceFactory = I2cBus> {
     /// Option 包装允许 `recover()` 先关闭旧连接再打开新连接，
     /// 避免两个 fd 同时指向 /dev/i2c-N 导致 RP1 控制器状态混乱。
@@ -115,6 +116,10 @@ pub struct Display<B: I2cDevice + I2cDeviceFactory = I2cBus> {
     contrast: u8,
     /// 当前反色状态（recover 后恢复）。
     inverted: bool,
+    /// 当前显示开关状态（recover 后恢复）。
+    display_on: bool,
+    /// 当前全屏点亮测试模式状态（recover 后恢复）。
+    entire_display_on: bool,
     /// 运行统计。
     stats: DriverStats,
     /// 日志回调；未设置时默认输出到 stderr。
@@ -155,6 +160,8 @@ impl Display<I2cBus> {
             addr: config.addr,
             contrast: config.contrast,
             inverted: config.inverted,
+            display_on: config.display_on,
+            entire_display_on: false,
             stats: DriverStats::default(),
             logger: None,
             last_recover_failed: None,
@@ -174,6 +181,8 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
             addr: config.addr,
             contrast: config.contrast,
             inverted: config.inverted,
+            display_on: config.display_on,
+            entire_display_on: false,
             stats: DriverStats::default(),
             logger: None,
             last_recover_failed: None,
@@ -223,6 +232,10 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
         w: usize,
         h: usize,
     ) -> Result<(), DriverError> {
+        // 空区域不产生任何 I2C 写入，不计入推帧统计
+        if w == 0 || h == 0 || x >= WIDTH || y >= HEIGHT {
+            return Ok(());
+        }
         let result = match self.driver.as_mut() {
             Some(driver) => driver.render_region(&self.framebuffer, x, y, w, h),
             None => return Err(DriverError::NotInitialized),
@@ -260,6 +273,7 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     /// 两种翻页形式由调用方自行选择。
     pub fn show_page(&mut self, page: &Framebuffer) -> Result<(), DriverError> {
         self.framebuffer.buffer.copy_from_slice(&page.buffer);
+        self.framebuffer.mark_all_dirty();
         self.render()
     }
 
@@ -316,6 +330,7 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
         let k = k.min(steps);
         let offset = k * WIDTH / steps;
         blend_scroll_frame(&mut self.framebuffer.buffer, &current, &page.buffer, offset);
+        self.framebuffer.mark_all_dirty();
         self.render()?;
         if k >= steps {
             self.scroll_source = None;
@@ -413,19 +428,25 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     /// 用于面板测试：全屏点亮可快速判断像素/驱动是否正常。
     pub fn set_entire_display_on(&mut self, on: bool) -> Result<(), DriverError> {
         let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
-        Ok(driver.set_entire_display_on(on)?)
+        driver.set_entire_display_on(on)?;
+        self.entire_display_on = on;
+        Ok(())
     }
 
     /// 关闭 OLED 显示（进入休眠模式，0xAE）。GDDRAM 内容不受影响。
     pub fn sleep(&mut self) -> Result<(), DriverError> {
         let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
-        Ok(driver.sleep()?)
+        driver.sleep()?;
+        self.display_on = false;
+        Ok(())
     }
 
     /// 开启 OLED 显示（0xAF）。与 `sleep()` 相对。
     pub fn wake(&mut self) -> Result<(), DriverError> {
         let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
-        Ok(driver.wake()?)
+        driver.wake()?;
+        self.display_on = true;
+        Ok(())
     }
 
     /// 读取 SSD1309 状态寄存器原始值（bit7=忙，bit0=电荷泵使能）。
@@ -460,6 +481,7 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
         offset: usize,
     ) -> Result<(), DriverError> {
         scroll_horizontal_bits(&mut self.framebuffer.buffer, dir, offset);
+        self.framebuffer.mark_all_dirty();
         self.render()
     }
 
@@ -474,6 +496,7 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
         offset: usize,
     ) -> Result<(), DriverError> {
         scroll_vertical_bits(&mut self.framebuffer.buffer, dir, offset);
+        self.framebuffer.mark_all_dirty();
         self.render()
     }
 
@@ -481,7 +504,7 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     ///
     /// 先关闭旧 I2C 连接（确保旧 fd 释放），再打开新连接并重新初始化
     /// OLED 控制器。用于 I2C 总线卡死（SDA stuck / lost arbitration）后的恢复。
-    /// 恢复时沿用当前对比度与反色设置。
+    /// 恢复时沿用当前对比度、反色、显示开关与全屏点亮状态。
     ///
     /// 失败时记录恢复冷却（`render_robust` 在冷却期内不再自动重试）；
     /// 成功时清除冷却。
@@ -491,7 +514,14 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
         let result: Result<Ssd1309<B>, DriverError> = B::open(self.bus_id, self.addr)
             .map_err(Into::into)
             .and_then(|bus| {
-                Ssd1309::init(bus, self.contrast, self.inverted, true).map_err(Into::into)
+                let mut driver = Ssd1309::init(bus, self.contrast, self.inverted, self.display_on)
+                    .map_err(DriverError::from)?;
+                if self.entire_display_on {
+                    driver
+                        .set_entire_display_on(true)
+                        .map_err(DriverError::from)?;
+                }
+                Ok(driver)
             });
         match result {
             Ok(driver) => {
@@ -687,6 +717,32 @@ mod tests {
         assert!(w.contains(&Write {
             control: 0x00,
             bytes: vec![0xA7]
+        }));
+    }
+
+    #[test]
+    fn recover_preserves_display_off_and_entire_on() {
+        let (_log, failures, bus) = new_bus();
+        let mut config = DisplayConfig::new(1, 0x3C);
+        config.display_on = false;
+        let mut display = Display::<MockBus>::from_device(bus, config).unwrap();
+        display.set_entire_display_on(true).unwrap();
+
+        let factory_log = Arc::new(Mutex::new(Vec::new()));
+        MockBus::set_factory(Arc::clone(&factory_log), 0);
+        failures.set(usize::MAX);
+        display.recover().unwrap();
+
+        let w = factory_log.lock().unwrap();
+        // display_on=false 时恢复初始化不应发送 0xAF 唤醒
+        assert!(!w.contains(&Write {
+            control: 0x00,
+            bytes: vec![0xAF]
+        }));
+        // 全屏点亮测试模式应在恢复后重新应用
+        assert!(w.contains(&Write {
+            control: 0x00,
+            bytes: vec![0xA5]
         }));
     }
 
@@ -1077,6 +1133,16 @@ mod tests {
         display.render_region(0, 0, 128, 64).unwrap();
         assert_eq!(display.framebuffer.dirty_rect(), None);
         let _ = log;
+    }
+
+    #[test]
+    fn render_region_empty_does_not_count_frame() {
+        let (_log, _failures, bus) = new_bus();
+        let mut display =
+            Display::<MockBus>::from_device(bus, DisplayConfig::new(1, 0x3C)).unwrap();
+        display.render_region(200, 200, 10, 10).unwrap();
+        display.render_region(0, 0, 0, 10).unwrap();
+        assert_eq!(display.stats().frames_pushed, 0);
     }
 
     /// 长稳压力测试（默认忽略，用 `cargo test -- --ignored` 运行）：

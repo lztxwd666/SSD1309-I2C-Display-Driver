@@ -24,13 +24,16 @@ pub fn draw_text_inverted(fb: &mut Framebuffer, x: usize, y: usize, text: &str) 
 }
 
 fn draw_impl(fb: &mut Framebuffer, x: usize, y: usize, text: &str, gap: usize, mode: DrawMode) {
+    if y >= HEIGHT {
+        return;
+    }
     let mut cx = x;
     let mut cy = y;
     for ch in text.chars() {
         if ch == '\n' {
             // 换行：回到行首，下一行下移一行（字符高度 + 1px 行距）
             cx = x;
-            cy += font::CHAR_HEIGHT + 1;
+            cy = cy.saturating_add(font::CHAR_HEIGHT + 1);
             continue;
         }
         // 整行已超出屏幕下方或右侧 → 提前退出
@@ -114,6 +117,14 @@ mod tests {
     fn oob_no_panic() {
         let mut fb = Framebuffer::new();
         draw_text(&mut fb, 200, 200, "X");
+    }
+
+    #[test]
+    fn extreme_y_newline_no_panic() {
+        // 回归测试：极大 y 遇到换行时使用 saturating_add，不应溢出 panic
+        let mut fb = Framebuffer::new();
+        draw_text(&mut fb, 0, usize::MAX - 1, "\n");
+        assert!(fb.buffer.iter().all(|&b| b == 0));
     }
 
     #[test]

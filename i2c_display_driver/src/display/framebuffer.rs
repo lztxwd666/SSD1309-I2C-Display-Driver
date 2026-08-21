@@ -11,6 +11,7 @@
 //! 可只推送变化区域，节省 I2C 带宽。
 
 use core::convert::Infallible;
+use std::fmt;
 
 use embedded_graphics::{
     Pixel,
@@ -120,9 +121,17 @@ impl Framebuffer {
     /// 越界部分自动裁剪（只绘制屏幕内区域）。
     ///
     /// 脏矩形按实际写入区域一次性标记，不逐像素更新。
-    pub fn blit(&mut self, x: usize, y: usize, w: usize, h: usize, data: &[u8], mode: BlitMode) {
+    pub fn blit(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        data: &[u8],
+        mode: BlitMode,
+    ) -> Result<(), BlitError> {
         if w == 0 || h == 0 {
-            return;
+            return Ok(());
         }
         // 裁剪到屏幕范围
         let x0 = x.min(WIDTH);
@@ -130,12 +139,22 @@ impl Framebuffer {
         let x1 = x.saturating_add(w).min(WIDTH);
         let y1 = y.saturating_add(h).min(HEIGHT);
         if x0 >= x1 || y0 >= y1 {
-            return;
+            return Ok(());
+        }
+        // 只有在确实需要读取数据时才校验长度，避免全离屏空操作被误报
+        let row_bytes = w.div_ceil(8);
+        let required = row_bytes
+            .checked_mul(h)
+            .ok_or(BlitError::DimensionOverflow)?;
+        if data.len() < required {
+            return Err(BlitError::InsufficientData {
+                required,
+                actual: data.len(),
+            });
         }
         // 裁剪后的源偏移（位图坐标系）
         let src_x = x0 - x;
         let src_y = y0 - y;
-        let row_bytes = w.div_ceil(8);
         for row in 0..(y1 - y0) {
             for col in 0..(x1 - x0) {
                 let sx = src_x + col;
@@ -151,9 +170,10 @@ impl Framebuffer {
         // 脏矩形：实际写入区域（两个对角点即可扩展覆盖）
         self.mark_dirty(x0, y0);
         self.mark_dirty(x1 - 1, y1 - 1);
+        Ok(())
     }
 
-    fn mark_all_dirty(&mut self) {
+    pub(crate) fn mark_all_dirty(&mut self) {
         self.dirty = Some((0, 0, WIDTH, HEIGHT));
     }
 }
@@ -187,6 +207,36 @@ pub enum BlitMode {
     /// 点亮：仅置位为 1 的像素，0 不改变目标（适合在已有背景上绘制字形）。
     Set,
 }
+
+/// 位图 blit 错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlitError {
+    /// `data` 长度不足以表示完整位图。
+    InsufficientData {
+        /// 按 `w * h` 位图布局计算出的所需字节数。
+        required: usize,
+        /// 实际传入的 `data` 长度。
+        actual: usize,
+    },
+    /// 位图尺寸在计算所需字节数时溢出 `usize`。
+    DimensionOverflow,
+}
+
+impl fmt::Display for BlitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InsufficientData { required, actual } => {
+                write!(
+                    f,
+                    "位图数据长度不足：需要 {required} 字节，实际 {actual} 字节"
+                )
+            }
+            Self::DimensionOverflow => write!(f, "位图尺寸过大，计算所需字节数时溢出"),
+        }
+    }
+}
+
+impl std::error::Error for BlitError {}
 
 /// 多页帧缓冲：N 个独立页面，支持循环翻页。
 ///
@@ -404,7 +454,7 @@ mod tests {
         let mut fb = Framebuffer::new();
         // 2×2 位图：行1 = 11，行2 = 10
         let data = [0b1100_0000, 0b1000_0000];
-        fb.blit(10, 10, 2, 2, &data, BlitMode::Overwrite);
+        fb.blit(10, 10, 2, 2, &data, BlitMode::Overwrite).unwrap();
 
         assert!(fb.get_pixel(10, 10));
         assert!(fb.get_pixel(11, 10));
@@ -422,7 +472,7 @@ mod tests {
         let mut fb = Framebuffer::new();
         fb.set_pixel(11, 11, true); // 预置像素在位图 0 位处
         let data = [0b1100_0000, 0b1000_0000];
-        fb.blit(10, 10, 2, 2, &data, BlitMode::Set);
+        fb.blit(10, 10, 2, 2, &data, BlitMode::Set).unwrap();
 
         assert!(fb.get_pixel(10, 10));
         assert!(fb.get_pixel(11, 10));
@@ -435,16 +485,17 @@ mod tests {
         let mut fb = Framebuffer::new();
         // 8×1 位图从 x=124 开始：只画 124-127 四个像素
         let data = [0b1111_0000];
-        fb.blit(124, 0, 8, 1, &data, BlitMode::Overwrite);
+        fb.blit(124, 0, 8, 1, &data, BlitMode::Overwrite).unwrap();
         assert!(fb.get_pixel(124, 0));
         assert!(fb.get_pixel(127, 0));
         assert!(!fb.get_pixel(123, 0)); // 屏外不写
         // 完全在屏外 → 空操作
         let mut fb2 = Framebuffer::new();
-        fb2.blit(200, 200, 8, 8, &data, BlitMode::Overwrite);
+        fb2.blit(200, 200, 8, 8, &data, BlitMode::Overwrite)
+            .unwrap();
         assert_eq!(fb2.dirty_rect(), None);
         // 零尺寸 → 空操作
-        fb2.blit(0, 0, 0, 8, &data, BlitMode::Overwrite);
+        fb2.blit(0, 0, 0, 8, &data, BlitMode::Overwrite).unwrap();
         assert_eq!(fb2.dirty_rect(), None);
     }
 
@@ -453,7 +504,7 @@ mod tests {
         let mut fb = Framebuffer::new();
         // 10 位宽 1 行（MSB 优先）：字节0 = 11110000 → 列 0-3 亮；字节1 = 11000000 → 列 8-9 亮
         let data = [0b1111_0000, 0b1100_0000];
-        fb.blit(0, 0, 10, 1, &data, BlitMode::Overwrite);
+        fb.blit(0, 0, 10, 1, &data, BlitMode::Overwrite).unwrap();
         for x in [0, 1, 2, 3, 8, 9] {
             assert!(fb.get_pixel(x, 0), "列 {} 应点亮", x);
         }
@@ -461,6 +512,24 @@ mod tests {
             assert!(!fb.get_pixel(x, 0), "列 {} 应为灭", x);
         }
         assert!(!fb.get_pixel(10, 0));
+    }
+
+    #[test]
+    fn blit_rejects_insufficient_data() {
+        let mut fb = Framebuffer::new();
+        // 10 位宽 1 行需要 2 字节，只给 1 字节应返回错误且不产生部分绘制
+        let data = [0b1111_0000];
+        let err = fb
+            .blit(0, 0, 10, 1, &data, BlitMode::Overwrite)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BlitError::InsufficientData {
+                required: 2,
+                actual: 1
+            }
+        ));
+        assert!(fb.buffer.iter().all(|&b| b == 0));
     }
 
     #[test]

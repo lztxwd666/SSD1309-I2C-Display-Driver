@@ -10,7 +10,7 @@
 - **位图 blit**：`Framebuffer::blit` 绘制任意线性 1-bit 位图（含覆盖/点亮两种模式），便于自绘字形/图标
 - **软件滚动**：水平/垂直循环滚动（帧缓冲平移），跑马灯效果
 - **多页显示**：`PageBuffer` 多页管理，瞬时/滚动动画两种翻页形式
-- **可靠显示**：`render_robust()` 自动恢复 I2C 总线（失败后冷却退避），恢复后沿用对比度/反色设置；逐页推帧规避 Pi 5 RP1 大块传输限制
+- **可靠显示**：`render_robust()` 自动恢复 I2C 总线（失败后冷却退避），恢复后沿用对比度/反色/显示开关等设置；逐页推帧规避 Pi 5 RP1 大块传输限制
 - **状态读取**：`read_status()` 读取 SSD1309 状态寄存器（忙/电荷泵），辅助故障诊断
 - **可观测性**：运行统计（推帧数/错误数/恢复次数）、日志回调
 - **无硬件测试**：记录型 `MockBus` 验证命令序列，测试全部离线运行（含长稳故障注入测试）
@@ -95,7 +95,7 @@ use i2c_display_driver::display::BlitMode;
 
 // 绘制线性 1-bit 位图（逐行打包，MSB 优先）到指定位置
 let data = [0b1111_0000, 0b1100_0000]; // 10×1 位图
-display.framebuffer.blit(0, 0, 10, 1, &data, BlitMode::Set); // Set=只点亮，Overwrite=覆盖
+display.framebuffer.blit(0, 0, 10, 1, &data, BlitMode::Set).unwrap(); // Set=只点亮，Overwrite=覆盖
 
 // 读取状态寄存器（bit7=忙，bit0=电荷泵使能），辅助故障诊断
 let st = display.read_status()?;
