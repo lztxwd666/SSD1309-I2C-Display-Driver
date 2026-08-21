@@ -7,11 +7,13 @@
 - **帧缓冲**：1024 字节 1-bit 帧缓冲（8 页 × 128 列），实现 `embedded-graphics` `DrawTarget`，可接收矩形/圆/文字/图像等原语
 - **脏矩形跟踪**：自动记录修改区域，`render_dirty()` 只推送变化部分，节省 I2C 带宽
 - **文字与图形**：内嵌 5×7 位图字体（含 `°`/`↑`/`↓`），矩形/直线/圆/三角形等基础图形
+- **位图 blit**：`Framebuffer::blit` 绘制任意线性 1-bit 位图（含覆盖/点亮两种模式），便于自绘字形/图标
 - **软件滚动**：水平/垂直循环滚动（帧缓冲平移），跑马灯效果
-- **多页显示**：`PageBuffer` 多页管理，翻页显示
-- **可靠显示**：`render_robust()` 自动恢复 I2C 总线，恢复后沿用对比度/反色设置；逐页推帧规避 Pi 5 RP1 大块传输限制
+- **多页显示**：`PageBuffer` 多页管理，瞬时/滚动动画两种翻页形式
+- **可靠显示**：`render_robust()` 自动恢复 I2C 总线（失败后冷却退避），恢复后沿用对比度/反色设置；逐页推帧规避 Pi 5 RP1 大块传输限制
+- **状态读取**：`read_status()` 读取 SSD1309 状态寄存器（忙/电荷泵），辅助故障诊断
 - **可观测性**：运行统计（推帧数/错误数/恢复次数）、日志回调
-- **无硬件测试**：记录型 `MockBus` 验证命令序列，测试全部离线运行
+- **无硬件测试**：记录型 `MockBus` 验证命令序列，测试全部离线运行（含长稳故障注入测试）
 
 ## 快速开始
 
@@ -86,6 +88,20 @@ display.show_page(pages.page_at(0).unwrap())?;                 // 瞬时切换�
 display.scroll_to_page(pages.page_at(1).unwrap(), 32, 10)?;    // 滚动动画（新页从右侧滚入）
 ```
 
+### 位图 blit 与状态读取
+
+```rust
+use i2c_display_driver::display::BlitMode;
+
+// 绘制线性 1-bit 位图（逐行打包，MSB 优先）到指定位置
+let data = [0b1111_0000, 0b1100_0000]; // 10×1 位图
+display.framebuffer.blit(0, 0, 10, 1, &data, BlitMode::Set); // Set=只点亮，Overwrite=覆盖
+
+// 读取状态寄存器（bit7=忙，bit0=电荷泵使能），辅助故障诊断
+let st = display.read_status()?;
+println!("busy={} booster={}", st & 0x80 != 0, st & 0x01 != 0);
+```
+
 ### 自动恢复与统计
 
 ```rust
@@ -108,7 +124,9 @@ println!("推帧 {} 次，跳过 {} 帧，恢复 {} 次，错误 {} 次",
 | `feature_check` | 新功能验证：clear/fill/全屏点亮/局部推帧/滚动/recover/统计 |
 | `diag` | 硬件诊断 + 软件滚动演示 |
 | `scroll_demo` | 长文本跑马灯 + 垂直滚动演示 |
-| `page_demo` | 多页仪表：3 页自动翻页显示 |
+| `page_demo` | 多页仪表：瞬时与滚动动画两种翻页对比 |
+| `selftest` | 硬件自检：一键验证全链路（状态/全亮/字符表/滚动/翻页/统计） |
+| `stress` | 长稳压力测试：长时间循环覆盖全部功能路径（可配置轮数） |
 
 ```bash
 cargo run --example smoke
@@ -121,9 +139,9 @@ src/
 ├── lib.rs           模块组织与文档
 ├── error.rs         统一错误类型 DriverError
 └── display/
-    ├── i2c_bus.rs   I2C 设备抽象（I2cDevice / I2cDeviceFactory）+ Linux 实现
-    ├── ssd1309.rs   SSD1309 控制器：初始化 / 逐页推帧 / 局部推帧 / 显示控制
-    ├── framebuffer.rs 1-bit 帧缓冲 + 脏矩形 + PageBuffer
+    ├── i2c_bus.rs   I2C 设备抽象（I2cDevice 读写 / I2cDeviceFactory）+ Linux 实现
+    ├── ssd1309.rs   SSD1309 控制器：初始化 / 逐页推帧 / 局部推帧 / 显示控制 / 状态读取
+    ├── framebuffer.rs 1-bit 帧缓冲 + 脏矩形 + blit 位图 + PageBuffer
     ├── mock.rs      记录型 MockBus（仅测试编译）
     └── mod.rs       Display 顶层句柄：推帧 / 恢复 / 统计 / 软件滚动 / 多页
 └── graphics/

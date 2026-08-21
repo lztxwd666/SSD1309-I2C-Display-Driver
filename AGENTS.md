@@ -8,7 +8,7 @@ Rust 库驱动 SSD1309 I2C OLED（128×64 单色），仅面向 Linux。crate �
 - `src/display/` — `i2c_bus`、`ssd1309`、`framebuffer`、`mock`（仅测试编译），顶层句柄在 `mod.rs`
 - `src/graphics/` — 5×7 `font`、`text`、`canvas`（基础图形）
 - `src/error.rs` — 统一 `DriverError`
-- `examples/` — 硬件演示：`smoke`、`showcase`、`feature_check`、`diag`、`scroll_demo`、`page_demo`
+- `examples/` — 硬件演示：`smoke`、`showcase`、`feature_check`、`diag`、`scroll_demo`、`page_demo`、`selftest`、`stress`
 - 测试位于 `#[cfg(test)]` 模块（与被测代码相邻）；字体数据内嵌于 `font.rs`（无资源文件）
 
 分层结构（自底向上）：
@@ -37,7 +37,10 @@ cargo run --example showcase       # 全功能循环演示（文字/图形/日�
 cargo run --example feature_check  # 新功能验证（clear/fill/全屏点亮/局部推帧/软件滚动/recover/统计）
 cargo run --example diag           # 硬件诊断 + 软件滚动演示
 cargo run --example scroll_demo    # 长文本跑马灯 + 垂直滚动演示
-cargo run --example page_demo      # 多页仪表：3 页自动翻页显示
+cargo run --example page_demo      # 多页仪表：瞬时与滚动动画两种翻页对比
+cargo run --example selftest       # 硬件自检：一键验证全链路
+cargo run --example stress [轮数]  # 长稳压力测试（默认 3000 轮）
+cargo test -- --ignored            # 长稳自动化测试（MockBus 故障注入验证恢复链路）
 ```
 
 仅限 Linux：依赖 `/dev/i2c-N` 与 `std::os::fd`（aarch64 Debian 12）。树莓派需在 `/boot/firmware/config.txt` 启用 `dtparam=i2c_arm=on`。
