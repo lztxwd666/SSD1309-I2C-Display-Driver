@@ -7,19 +7,22 @@
 //! 便于测试注入 Mock 总线或接入其他后端。
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 
 const I2C_SLAVE: u64 = 0x0703;
 
-/// I2C 设备抽象：驱动所需的写入接口。
+/// I2C 设备抽象：驱动所需的写入与读取接口。
 ///
-/// 实现者需提供命令（控制字节 0x00）与数据（控制字节 0x40）两通道写入。
+/// 实现者需提供命令（控制字节 0x00）与数据（控制字节 0x40）两通道写入，
+/// 以及一个字节的状态读取（SSD1309 状态寄存器）。
 pub trait I2cDevice {
     /// 发送命令（0x00 控制字节前缀）。
     fn write_command(&mut self, bytes: &[u8]) -> io::Result<()>;
     /// 发送 GDDRAM 数据（0x40 控制字节前缀）。
     fn write_data(&mut self, bytes: &[u8]) -> io::Result<()>;
+    /// 读取一个字节（SSD1309 状态寄存器：bit7=忙，bit0=电荷泵使能）。
+    fn read(&mut self) -> io::Result<u8>;
 }
 
 /// I2C 设备工厂：按总线编号与从机地址打开设备。
@@ -88,6 +91,24 @@ impl I2cDevice for I2cBus {
         buf[0] = 0x40;
         buf[1..1 + bytes.len()].copy_from_slice(bytes);
         write_i2c(&self.file, &buf[..1 + bytes.len()])
+    }
+
+    /// 读取一个字节（SSD1309 状态寄存器）。
+    ///
+    /// SSD1306/1309 的 I2C 读序列要求先发送控制字节 0x00（命令模式）
+    /// 选择状态寄存器，再进行读操作；两次独立事务在从机侧等效于
+    /// 重复起始（实测可用）。
+    fn read(&mut self) -> io::Result<u8> {
+        write_i2c(&self.file, &[0x00])?;
+        let mut buf = [0u8; 1];
+        let n = self.file.read(&mut buf)?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "I2C 读取无数据返回",
+            ));
+        }
+        Ok(buf[0])
     }
 }
 

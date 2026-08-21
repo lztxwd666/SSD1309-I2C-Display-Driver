@@ -4,7 +4,7 @@
 //! * `draw_text_inverted` — 反色模式（需先填充背景）
 
 use super::font;
-use crate::display::Framebuffer;
+use crate::display::{Framebuffer, HEIGHT, WIDTH};
 
 enum DrawMode {
     Set,
@@ -34,18 +34,18 @@ fn draw_impl(fb: &mut Framebuffer, x: usize, y: usize, text: &str, gap: usize, m
             continue;
         }
         // 整行已超出屏幕下方或右侧 → 提前退出
-        if cy >= 64 || cx >= 128 {
+        if cy >= HEIGHT || cx >= WIDTH {
             break;
         }
         let glyph = font::glyph(ch);
         for (col, &col_data) in glyph.iter().enumerate() {
             let px = cx + col;
-            if px >= 128 {
+            if px >= WIDTH {
                 break;
             }
             for bit in 0..font::CHAR_HEIGHT {
                 let py = cy + bit;
-                if py >= 64 {
+                if py >= HEIGHT {
                     break;
                 }
                 if (col_data & (1 << bit)) != 0 {

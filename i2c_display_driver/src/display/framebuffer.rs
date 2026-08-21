@@ -113,6 +113,46 @@ impl Framebuffer {
         d.3 = d.3.max(y + 1);
     }
 
+    /// 将线性 1-bit 位图绘制到帧缓冲指定位置。
+    ///
+    /// `data` 为逐行打包的位图：每行 `w` 位按 8 位一组（MSB 优先）存入字节，
+    /// 行末不足 8 位时高位补零；`data` 长度须 ≥ `w.div_ceil(8) * h`。
+    /// 越界部分自动裁剪（只绘制屏幕内区域）。
+    ///
+    /// 脏矩形按实际写入区域一次性标记，不逐像素更新。
+    pub fn blit(&mut self, x: usize, y: usize, w: usize, h: usize, data: &[u8], mode: BlitMode) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        // 裁剪到屏幕范围
+        let x0 = x.min(WIDTH);
+        let y0 = y.min(HEIGHT);
+        let x1 = x.saturating_add(w).min(WIDTH);
+        let y1 = y.saturating_add(h).min(HEIGHT);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        // 裁剪后的源偏移（位图坐标系）
+        let src_x = x0 - x;
+        let src_y = y0 - y;
+        let row_bytes = w.div_ceil(8);
+        for row in 0..(y1 - y0) {
+            for col in 0..(x1 - x0) {
+                let sx = src_x + col;
+                let byte = data[(src_y + row) * row_bytes + sx / 8];
+                let on = byte & (0x80 >> (sx % 8)) != 0;
+                if on {
+                    write_pixel(&mut self.buffer, x0 + col, y0 + row, true);
+                } else if mode == BlitMode::Overwrite {
+                    write_pixel(&mut self.buffer, x0 + col, y0 + row, false);
+                }
+            }
+        }
+        // 脏矩形：实际写入区域（两个对角点即可扩展覆盖）
+        self.mark_dirty(x0, y0);
+        self.mark_dirty(x1 - 1, y1 - 1);
+    }
+
     fn mark_all_dirty(&mut self) {
         self.dirty = Some((0, 0, WIDTH, HEIGHT));
     }
@@ -137,6 +177,15 @@ impl Default for Framebuffer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 位图 blit 模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlitMode {
+    /// 覆盖：位图的 0/1 均写入目标（1 点亮、0 熄灭）。
+    Overwrite,
+    /// 点亮：仅置位为 1 的像素，0 不改变目标（适合在已有背景上绘制字形）。
+    Set,
 }
 
 /// 多页帧缓冲：N 个独立页面，支持循环翻页。
@@ -348,6 +397,70 @@ mod tests {
         let mut fb = Framebuffer::new();
         fb.clear();
         assert_eq!(fb.dirty_rect(), Some((0, 0, WIDTH, HEIGHT)));
+    }
+
+    #[test]
+    fn blit_draws_bitmap_and_tracks_dirty() {
+        let mut fb = Framebuffer::new();
+        // 2×2 位图：行1 = 11，行2 = 10
+        let data = [0b1100_0000, 0b1000_0000];
+        fb.blit(10, 10, 2, 2, &data, BlitMode::Overwrite);
+
+        assert!(fb.get_pixel(10, 10));
+        assert!(fb.get_pixel(11, 10));
+        assert!(fb.get_pixel(10, 11));
+        assert!(
+            !fb.get_pixel(11, 11),
+            "位图 0 位在 Overwrite 模式应熄灭目标像素"
+        );
+        // 脏矩形 = 实际写入区域
+        assert_eq!(fb.dirty_rect(), Some((10, 10, 2, 2)));
+    }
+
+    #[test]
+    fn blit_set_mode_preserves_zero_bits() {
+        let mut fb = Framebuffer::new();
+        fb.set_pixel(11, 11, true); // 预置像素在位图 0 位处
+        let data = [0b1100_0000, 0b1000_0000];
+        fb.blit(10, 10, 2, 2, &data, BlitMode::Set);
+
+        assert!(fb.get_pixel(10, 10));
+        assert!(fb.get_pixel(11, 10));
+        assert!(fb.get_pixel(10, 11));
+        assert!(fb.get_pixel(11, 11), "Set 模式不应清除预置像素");
+    }
+
+    #[test]
+    fn blit_clips_to_screen() {
+        let mut fb = Framebuffer::new();
+        // 8×1 位图从 x=124 开始：只画 124-127 四个像素
+        let data = [0b1111_0000];
+        fb.blit(124, 0, 8, 1, &data, BlitMode::Overwrite);
+        assert!(fb.get_pixel(124, 0));
+        assert!(fb.get_pixel(127, 0));
+        assert!(!fb.get_pixel(123, 0)); // 屏外不写
+        // 完全在屏外 → 空操作
+        let mut fb2 = Framebuffer::new();
+        fb2.blit(200, 200, 8, 8, &data, BlitMode::Overwrite);
+        assert_eq!(fb2.dirty_rect(), None);
+        // 零尺寸 → 空操作
+        fb2.blit(0, 0, 0, 8, &data, BlitMode::Overwrite);
+        assert_eq!(fb2.dirty_rect(), None);
+    }
+
+    #[test]
+    fn blit_multi_byte_row() {
+        let mut fb = Framebuffer::new();
+        // 10 位宽 1 行（MSB 优先）：字节0 = 11110000 → 列 0-3 亮；字节1 = 11000000 → 列 8-9 亮
+        let data = [0b1111_0000, 0b1100_0000];
+        fb.blit(0, 0, 10, 1, &data, BlitMode::Overwrite);
+        for x in [0, 1, 2, 3, 8, 9] {
+            assert!(fb.get_pixel(x, 0), "列 {} 应点亮", x);
+        }
+        for x in [4, 5, 6, 7] {
+            assert!(!fb.get_pixel(x, 0), "列 {} 应为灭", x);
+        }
+        assert!(!fb.get_pixel(10, 0));
     }
 
     #[test]

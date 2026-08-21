@@ -9,7 +9,7 @@ mod ssd1309;
 #[cfg(test)]
 mod mock;
 
-pub use framebuffer::{Framebuffer, HEIGHT, PageBuffer, WIDTH};
+pub use framebuffer::{BlitMode, Framebuffer, HEIGHT, PageBuffer, WIDTH};
 pub use i2c_bus::{I2cBus, I2cDevice, I2cDeviceFactory};
 pub use ssd1309::Ssd1309;
 
@@ -428,6 +428,27 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
         Ok(driver.wake()?)
     }
 
+    /// 读取 SSD1309 状态寄存器原始值（bit7=忙，bit0=电荷泵使能）。
+    ///
+    /// 用于故障诊断：读失败说明总线异常；读成功但 busy 持续置位
+    /// 说明屏幕内部忙（控制器无响应），二者恢复策略不同。
+    /// 解析辅助见 [`status_busy`](Self::status_busy) 与
+    /// [`status_booster`](Self::status_booster)。
+    pub fn read_status(&mut self) -> Result<u8, DriverError> {
+        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+        Ok(driver.read_status()?)
+    }
+
+    /// 解析状态字节：忙标志（bit7）。
+    pub fn status_busy(status: u8) -> bool {
+        status & 0x80 != 0
+    }
+
+    /// 解析状态字节：电荷泵（DC-DC 升压器）使能标志（bit0）。
+    pub fn status_booster(status: u8) -> bool {
+        status & 0x01 != 0
+    }
+
     /// 水平滚动：将帧缓冲内容循环平移 `offset` 像素并推帧。
     ///
     /// 通过帧缓冲平移实现（实测本项目屏幕不响应硬件滚动命令 0x26/0x2F，
@@ -588,7 +609,11 @@ mod tests {
     fn new_bus() -> SharedBus {
         let log = Arc::new(Mutex::new(Vec::new()));
         let failures = Rc::new(Cell::new(0));
-        let bus = MockBus::new(Arc::clone(&log), Rc::clone(&failures));
+        let bus = MockBus::new(
+            Arc::clone(&log),
+            Rc::clone(&failures),
+            Rc::new(Cell::new(0x01)),
+        );
         (log, failures, bus)
     }
 
@@ -1051,6 +1076,79 @@ mod tests {
         // 推送覆盖整个脏矩形的区域 → 才清除
         display.render_region(0, 0, 128, 64).unwrap();
         assert_eq!(display.framebuffer.dirty_rect(), None);
+        let _ = log;
+    }
+
+    /// 长稳压力测试（默认忽略，用 `cargo test -- --ignored` 运行）：
+    /// 循环渲染/滚动/翻页 5000 帧，每 100 帧注入一次总线写入失败，
+    /// 验证恢复链路（render_robust → recover）在长时间运行下的正确性。
+    #[test]
+    #[ignore = "长稳测试：cargo test -- --ignored 运行"]
+    fn long_run_stress_with_fault_injection() {
+        let (log, failures, bus) = new_bus();
+        let mut display =
+            Display::<MockBus>::from_device(bus, DisplayConfig::new(1, 0x3C)).unwrap();
+        // 工厂共享同一失败句柄：recover 后的新总线仍受外部注入控制
+        MockBus::set_factory_cell(Arc::clone(&log), Rc::clone(&failures));
+
+        let mut pages = PageBuffer::<2>::new();
+        pages.page_at_mut(0).unwrap().set_pixel(1, 1, true);
+        pages.page_at_mut(1).unwrap().set_pixel(127, 63, true);
+
+        for i in 0..5000usize {
+            // 每 100 帧注入 1 次写入失败，模拟 I2C 偶发故障
+            if i % 100 == 0 {
+                failures.set(1);
+                // 注入后工厂仍指向同一句柄，保证 recover 创建健康总线
+                MockBus::set_factory_cell(Arc::clone(&log), Rc::clone(&failures));
+            }
+            // 帧内容随迭代变化
+            let px = i % 128;
+            let py = i % 64;
+            display.framebuffer.set_pixel(px, py, true);
+            let _ = display.render_robust();
+            // 滚动与翻页路径周期性覆盖
+            if i % 50 == 0 {
+                let _ = display.software_scroll_horizontal(ScrollDirection::Left, 1);
+            }
+            if i % 200 == 0 {
+                display
+                    .show_page(pages.page_at(i / 200 % 2).unwrap())
+                    .unwrap();
+            }
+        }
+
+        let s = display.stats();
+        println!(
+            "长稳结果：推帧 {}，错误 {}，跳过 {}，恢复 {}",
+            s.frames_pushed, s.errors, s.frames_skipped, s.recoveries
+        );
+        // 5000 帧中注入 50 次故障，每次恢复后重试成功
+        assert!(s.frames_pushed >= 4950, "推帧数 {} 过少", s.frames_pushed);
+        assert!(s.errors >= 40, "错误注入应被记录，实际 {}", s.errors);
+        assert!(s.recoveries >= 40, "应完成恢复，实际 {}", s.recoveries);
+        assert!(s.frames_skipped < 50, "跳过帧 {} 过多", s.frames_skipped);
+    }
+
+    #[test]
+    fn read_status_returns_bus_status() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let status = Rc::new(Cell::new(0x81)); // busy + booster
+        let bus = MockBus::new(Arc::clone(&log), Rc::new(Cell::new(0)), Rc::clone(&status));
+        let mut display =
+            Display::<MockBus>::from_device(bus, DisplayConfig::new(1, 0x3C)).unwrap();
+
+        assert_eq!(display.read_status().unwrap(), 0x81);
+        // 状态解析
+        assert!(Display::<MockBus>::status_busy(0x81));
+        assert!(Display::<MockBus>::status_booster(0x81));
+        assert!(!Display::<MockBus>::status_busy(0x01));
+        assert!(!Display::<MockBus>::status_booster(0x80));
+
+        // 状态在运行中可变（模拟真实忙状态变化）
+        status.set(0x00);
+        assert_eq!(display.read_status().unwrap(), 0x00);
+        assert!(!Display::<MockBus>::status_busy(0x00));
         let _ = log;
     }
 

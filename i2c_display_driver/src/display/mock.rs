@@ -21,8 +21,11 @@ pub(crate) struct Write {
     pub bytes: Vec<u8>,
 }
 
-/// 工厂状态：下次 open 使用的日志句柄与失败次数。
-type FactoryState = Option<(Arc<Mutex<Vec<Write>>>, usize)>;
+/// 工厂状态：下次 open 使用的日志句柄与失败计数。
+///
+/// 失败计数使用 `Rc<Cell<usize>>`：recover 后新总线与测试持有同一句柄，
+/// 长稳测试的周期性故障注入始终作用于"当前总线"。
+type FactoryState = Option<(Arc<Mutex<Vec<Write>>>, Rc<Cell<usize>>)>;
 
 thread_local! {
     /// 工厂状态（线程本地）：下次 open 使用的日志句柄与失败次数。
@@ -35,16 +38,36 @@ pub(crate) struct MockBus {
     log: Arc<Mutex<Vec<Write>>>,
     /// 剩余失败写入次数（通过共享 Cell 可在持有总线后修改）。
     failures: Rc<Cell<usize>>,
+    /// 状态寄存器返回值（模拟 `read` 读取）。
+    status: Rc<Cell<u8>>,
 }
 
 impl MockBus {
     /// 创建 MockBus，日志与失败计数通过共享句柄由测试持有。
-    pub(crate) fn new(log: Arc<Mutex<Vec<Write>>>, failures: Rc<Cell<usize>>) -> Self {
-        Self { log, failures }
+    pub(crate) fn new(
+        log: Arc<Mutex<Vec<Write>>>,
+        failures: Rc<Cell<usize>>,
+        status: Rc<Cell<u8>>,
+    ) -> Self {
+        Self {
+            log,
+            failures,
+            status,
+        }
     }
 
     /// 设置工厂下一次 open 创建的 MockBus 的日志句柄与失败次数。
+    ///
+    /// 失败次数以值传入（独立 `Rc<Cell>`）；需要跨 recover 持续注入时
+    /// 使用 [`set_factory_cell`](Self::set_factory_cell) 共享同一句柄。
     pub(crate) fn set_factory(log: Arc<Mutex<Vec<Write>>>, failures: usize) {
+        Self::set_factory_cell(log, Rc::new(Cell::new(failures)));
+    }
+
+    /// 设置工厂下一次 open 创建的 MockBus 的日志句柄与共享失败句柄。
+    ///
+    /// recover 后新总线与调用方持有同一 `Rc<Cell>`，注入持续有效。
+    pub(crate) fn set_factory_cell(log: Arc<Mutex<Vec<Write>>>, failures: Rc<Cell<usize>>) {
         FACTORY.with(|f| *f.borrow_mut() = Some((log, failures)));
     }
 
@@ -70,16 +93,22 @@ impl I2cDevice for MockBus {
     fn write_data(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.write(0x40, bytes)
     }
+
+    fn read(&mut self) -> io::Result<u8> {
+        Ok(self.status.get())
+    }
 }
 
 impl I2cDeviceFactory for MockBus {
     fn open(_bus_id: u8, _addr: u8) -> io::Result<Self> {
         let (log, failures) = FACTORY
             .with(|f| f.borrow_mut().take())
-            .unwrap_or_else(|| (Arc::new(Mutex::new(Vec::new())), 0));
+            .unwrap_or_else(|| (Arc::new(Mutex::new(Vec::new())), Rc::new(Cell::new(0))));
         Ok(Self {
             log,
-            failures: Rc::new(Cell::new(failures)),
+            failures,
+            // 默认模拟真机状态：电荷泵使能（0x01）
+            status: Rc::new(Cell::new(0x01)),
         })
     }
 }

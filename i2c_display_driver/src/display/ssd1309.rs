@@ -23,7 +23,7 @@ impl<B: I2cDevice> Ssd1309<B> {
     pub fn init(mut bus: B, contrast: u8, inverted: bool, display_on: bool) -> io::Result<Self> {
         bus.write_command(&[0xAE])?; // 关闭显示（休眠模式）
         bus.write_command(&[0xD5, 0x80])?; // 时钟分频/振荡器频率
-        bus.write_command(&[0xA8, 0x3F])?; // 多路复用比 64（128×64 面板）
+        bus.write_command(&[0xA8, (HEIGHT - 1) as u8])?; // 多路复用比 = 行数-1（64 行 → 0x3F）
         bus.write_command(&[0xD3, 0x00])?; // 显示偏移 0
         bus.write_command(&[0x40])?; // 起始行地址 0
         bus.write_command(&[0x8D, 0x14])?; // 电荷泵使能（内部 DC-DC）
@@ -118,6 +118,13 @@ impl<B: I2cDevice> Ssd1309<B> {
     pub fn wake(&mut self) -> io::Result<()> {
         self.bus.write_command(&[0xAF])
     }
+
+    /// 读取状态寄存器（bit7=忙，bit0=电荷泵使能）。
+    ///
+    /// 用于故障诊断：区分总线故障与屏幕未响应（busy 长时间置位）。
+    pub fn read_status(&mut self) -> io::Result<u8> {
+        self.bus.read()
+    }
 }
 
 #[cfg(test)]
@@ -131,7 +138,11 @@ mod tests {
     /// 构造带独立日志的 MockBus。
     fn mock_bus() -> (Arc<Mutex<Vec<Write>>>, MockBus) {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let bus = MockBus::new(Arc::clone(&log), Rc::new(Cell::new(0)));
+        let bus = MockBus::new(
+            Arc::clone(&log),
+            Rc::new(Cell::new(0)),
+            Rc::new(Cell::new(0x01)),
+        );
         (log, bus)
     }
 
@@ -409,6 +420,14 @@ mod tests {
         assert_eq!(w.len(), (8 + 1) * 3, "8 页 + 1 页，每页 3 次写入");
         assert_eq!(w[2].bytes.len(), 10);
         assert_eq!(w[8 * 3].bytes[0], 0xB7, "第二区域页地址应为 page7");
+    }
+
+    #[test]
+    fn read_status_returns_bus_value() {
+        let (log, bus) = mock_bus(); // 默认状态 0x01（电荷泵使能）
+        let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
+        assert_eq!(ssd.read_status().unwrap(), 0x01);
+        let _ = log;
     }
 
     #[test]
