@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ssd1309-driver"
+version = "0.1.0"
+description = "纯 Python SSD1309 I2C OLED 显示屏驱动"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools]
+packages = ["ssd1309_driver"]
