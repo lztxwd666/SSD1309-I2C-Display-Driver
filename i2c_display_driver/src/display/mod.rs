@@ -42,6 +42,18 @@ pub enum VerticalDirection {
     Down,
 }
 
+/// 显示旋转方向。
+///
+/// 当前实现 0°/180° 两种由硬件段重映射与 COM 扫描方向直接支持的方向。
+/// 90°/270° 需要软件坐标变换，本特化驱动暂不提供。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayRotation {
+    /// 不旋转（当前面板默认方向）。
+    Rotate0,
+    /// 旋转 180°（上下左右同时翻转）。
+    Rotate180,
+}
+
 /// 显示初始化配置。
 #[derive(Debug, Clone, Copy)]
 pub struct DisplayConfig {
@@ -55,6 +67,28 @@ pub struct DisplayConfig {
     pub inverted: bool,
     /// 初始化完成后是否立即开启显示，默认 true。
     pub display_on: bool,
+    /// 初始旋转方向，默认 `Rotate0`。
+    pub rotation: DisplayRotation,
+    /// 显示偏移（0-63），默认 0。
+    pub display_offset: u8,
+    /// 起始行地址（0-63），默认 0。
+    pub start_line: u8,
+    /// 多路复用比（行数-1），默认 0x3F。
+    pub multiplex_ratio: u8,
+    /// 时钟分频比，默认 0。
+    pub clock_divide_ratio: u8,
+    /// 振荡器频率，默认 8。
+    pub clock_frequency: u8,
+    /// 预充电阶段 1，默认 0x01。
+    pub precharge_phase1: u8,
+    /// 预充电阶段 2，默认 0x0F。
+    pub precharge_phase2: u8,
+    /// VCOMH 取消选择电平，默认 0x40。
+    pub vcomh_level: u8,
+    /// COM 引脚硬件配置，默认 0x12。
+    pub com_pins_config: u8,
+    /// 电荷泵使能，默认 true。
+    pub charge_pump_enabled: bool,
 }
 
 impl DisplayConfig {
@@ -66,7 +100,112 @@ impl DisplayConfig {
             contrast: 0xCF,
             inverted: false,
             display_on: true,
+            rotation: DisplayRotation::Rotate0,
+            display_offset: 0,
+            start_line: 0,
+            multiplex_ratio: 0x3F,
+            clock_divide_ratio: 0,
+            clock_frequency: 8,
+            precharge_phase1: 0x01,
+            precharge_phase2: 0x0F,
+            vcomh_level: 0x40,
+            com_pins_config: 0x12,
+            charge_pump_enabled: true,
         }
+    }
+}
+
+/// 显示初始化 Builder，提供比直接构造 `DisplayConfig` 更易读的链式配置。
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayBuilder {
+    config: DisplayConfig,
+}
+
+impl DisplayBuilder {
+    /// 使用总线编号和从机地址创建 Builder。
+    pub fn new(bus_id: u8, addr: u8) -> Self {
+        Self {
+            config: DisplayConfig::new(bus_id, addr),
+        }
+    }
+
+    /// 设置初始对比度。
+    pub fn with_contrast(mut self, contrast: u8) -> Self {
+        self.config.contrast = contrast;
+        self
+    }
+
+    /// 设置初始反色状态。
+    pub fn with_inverted(mut self, inverted: bool) -> Self {
+        self.config.inverted = inverted;
+        self
+    }
+
+    /// 设置初始化完成后是否立即开启显示。
+    pub fn with_display_on(mut self, display_on: bool) -> Self {
+        self.config.display_on = display_on;
+        self
+    }
+
+    /// 设置初始旋转方向。
+    pub fn with_rotation(mut self, rotation: DisplayRotation) -> Self {
+        self.config.rotation = rotation;
+        self
+    }
+
+    /// 设置显示偏移。
+    pub fn with_display_offset(mut self, offset: u8) -> Self {
+        self.config.display_offset = offset;
+        self
+    }
+
+    /// 设置起始行地址。
+    pub fn with_start_line(mut self, line: u8) -> Self {
+        self.config.start_line = line;
+        self
+    }
+
+    /// 设置多路复用比。
+    pub fn with_multiplex_ratio(mut self, ratio: u8) -> Self {
+        self.config.multiplex_ratio = ratio;
+        self
+    }
+
+    /// 设置时钟分频比与振荡器频率。
+    pub fn with_clock(mut self, divide_ratio: u8, frequency: u8) -> Self {
+        self.config.clock_divide_ratio = divide_ratio;
+        self.config.clock_frequency = frequency;
+        self
+    }
+
+    /// 设置预充电周期。
+    pub fn with_precharge_period(mut self, phase1: u8, phase2: u8) -> Self {
+        self.config.precharge_phase1 = phase1;
+        self.config.precharge_phase2 = phase2;
+        self
+    }
+
+    /// 设置 VCOMH 取消选择级别。
+    pub fn with_vcomh_level(mut self, level: u8) -> Self {
+        self.config.vcomh_level = level;
+        self
+    }
+
+    /// 设置 COM 引脚硬件配置。
+    pub fn with_com_pins_config(mut self, config: u8) -> Self {
+        self.config.com_pins_config = config;
+        self
+    }
+
+    /// 设置电荷泵使能状态。
+    pub fn with_charge_pump(mut self, enabled: bool) -> Self {
+        self.config.charge_pump_enabled = enabled;
+        self
+    }
+
+    /// 使用当前配置打开并初始化显示器。
+    pub fn build(self) -> Result<Display<I2cBus>, DriverError> {
+        Display::open_config(self.config)
     }
 }
 
@@ -110,14 +249,8 @@ pub struct Display<B: I2cDevice + I2cDeviceFactory = I2cBus> {
     /// 避免两个 fd 同时指向 /dev/i2c-N 导致 RP1 控制器状态混乱。
     driver: Option<Ssd1309<B>>,
     pub framebuffer: Framebuffer,
-    bus_id: u8,
-    addr: u8,
-    /// 当前对比度（recover 后恢复）。
-    contrast: u8,
-    /// 当前反色状态（recover 后恢复）。
-    inverted: bool,
-    /// 当前显示开关状态（recover 后恢复）。
-    display_on: bool,
+    /// 当前完整配置（recover 后按此恢复）。
+    config: DisplayConfig,
     /// 当前全屏点亮测试模式状态（recover 后恢复）。
     entire_display_on: bool,
     /// 运行统计。
@@ -152,15 +285,11 @@ impl Display<I2cBus> {
     /// 按配置打开并初始化显示器（打开 /dev/i2c-N 并初始化控制器）。
     pub fn open_config(config: DisplayConfig) -> Result<Self, DriverError> {
         let bus = I2cBus::open(config.bus_id, config.addr)?;
-        let driver = Ssd1309::init(bus, config.contrast, config.inverted, config.display_on)?;
+        let driver = Ssd1309::init_with_config(bus, &config)?;
         Ok(Self {
             driver: Some(driver),
             framebuffer: Framebuffer::new(),
-            bus_id: config.bus_id,
-            addr: config.addr,
-            contrast: config.contrast,
-            inverted: config.inverted,
-            display_on: config.display_on,
+            config,
             entire_display_on: false,
             stats: DriverStats::default(),
             logger: None,
@@ -173,15 +302,11 @@ impl Display<I2cBus> {
 impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     /// 使用已打开的 I2C 设备构造显示器（自定义总线 / 测试用）。
     pub fn from_device(device: B, config: DisplayConfig) -> Result<Self, DriverError> {
-        let driver = Ssd1309::init(device, config.contrast, config.inverted, config.display_on)?;
+        let driver = Ssd1309::init_with_config(device, &config)?;
         Ok(Self {
             driver: Some(driver),
             framebuffer: Framebuffer::new(),
-            bus_id: config.bus_id,
-            addr: config.addr,
-            contrast: config.contrast,
-            inverted: config.inverted,
-            display_on: config.display_on,
+            config,
             entire_display_on: false,
             stats: DriverStats::default(),
             logger: None,
@@ -411,7 +536,7 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     pub fn set_contrast(&mut self, val: u8) -> Result<(), DriverError> {
         let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
         driver.set_contrast(val)?;
-        self.contrast = val;
+        self.config.contrast = val;
         Ok(())
     }
 
@@ -419,7 +544,7 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     pub fn set_inverted(&mut self, inverted: bool) -> Result<(), DriverError> {
         let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
         driver.set_inverted(inverted)?;
-        self.inverted = inverted;
+        self.config.inverted = inverted;
         Ok(())
     }
 
@@ -437,7 +562,7 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     pub fn sleep(&mut self) -> Result<(), DriverError> {
         let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
         driver.sleep()?;
-        self.display_on = false;
+        self.config.display_on = false;
         Ok(())
     }
 
@@ -445,8 +570,106 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     pub fn wake(&mut self) -> Result<(), DriverError> {
         let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
         driver.wake()?;
-        self.display_on = true;
+        self.config.display_on = true;
         Ok(())
+    }
+
+    /// 设置旋转方向。
+    ///
+    /// 仅切换段重映射与 COM 扫描方向，不清空帧缓冲；调用后应重新绘制或推帧。
+    pub fn set_rotation(&mut self, rotation: DisplayRotation) -> Result<(), DriverError> {
+        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+        driver.set_rotation(rotation)?;
+        self.config.rotation = rotation;
+        Ok(())
+    }
+
+    /// 设置显示偏移（0-63）。
+    pub fn set_display_offset(&mut self, offset: u8) -> Result<(), DriverError> {
+        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+        driver.set_display_offset(offset)?;
+        self.config.display_offset = offset;
+        Ok(())
+    }
+
+    /// 设置起始行地址（0-63）。
+    pub fn set_start_line(&mut self, line: u8) -> Result<(), DriverError> {
+        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+        driver.set_start_line(line)?;
+        self.config.start_line = line;
+        Ok(())
+    }
+
+    /// 设置多路复用比（行数-1，128×64 面板为 0x3F）。
+    pub fn set_multiplex_ratio(&mut self, ratio: u8) -> Result<(), DriverError> {
+        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+        driver.set_multiplex_ratio(ratio)?;
+        self.config.multiplex_ratio = ratio;
+        Ok(())
+    }
+
+    /// 设置时钟分频比与振荡器频率。
+    pub fn set_clock(&mut self, divide_ratio: u8, frequency: u8) -> Result<(), DriverError> {
+        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+        driver.set_clock(divide_ratio, frequency)?;
+        self.config.clock_divide_ratio = divide_ratio;
+        self.config.clock_frequency = frequency;
+        Ok(())
+    }
+
+    /// 设置预充电周期。
+    pub fn set_precharge_period(&mut self, phase1: u8, phase2: u8) -> Result<(), DriverError> {
+        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+        driver.set_precharge_period(phase1, phase2)?;
+        self.config.precharge_phase1 = phase1;
+        self.config.precharge_phase2 = phase2;
+        Ok(())
+    }
+
+    /// 设置 VCOMH 取消选择级别。
+    pub fn set_vcomh_level(&mut self, level: u8) -> Result<(), DriverError> {
+        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+        driver.set_vcomh_level(level)?;
+        self.config.vcomh_level = level;
+        Ok(())
+    }
+
+    /// 设置 COM 引脚硬件配置。
+    pub fn set_com_pins_config(&mut self, config: u8) -> Result<(), DriverError> {
+        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+        driver.set_com_pins_config(config)?;
+        self.config.com_pins_config = config;
+        Ok(())
+    }
+
+    /// 设置电荷泵使能状态。
+    pub fn set_charge_pump(&mut self, enabled: bool) -> Result<(), DriverError> {
+        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+        driver.set_charge_pump(enabled)?;
+        self.config.charge_pump_enabled = enabled;
+        Ok(())
+    }
+
+    /// 配置并激活水平硬件滚动。
+    ///
+    /// 注意：当前项目实测屏幕不响应硬件滚动命令；此方法仅为需要验证
+    /// 其他 SSD1309 面板或进行硬件兼容性测试时保留。常规滚动请使用
+    /// [`software_scroll_horizontal`](Self::software_scroll_horizontal)。
+    pub fn hardware_scroll_horizontal(
+        &mut self,
+        dir: ScrollDirection,
+        start_page: u8,
+        end_page: u8,
+        speed: u8,
+    ) -> Result<(), DriverError> {
+        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+        Ok(driver.hardware_scroll_horizontal(dir, start_page, end_page, speed)?)
+    }
+
+    /// 停止硬件滚动。
+    pub fn deactivate_scroll(&mut self) -> Result<(), DriverError> {
+        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+        Ok(driver.deactivate_scroll()?)
     }
 
     /// 读取 SSD1309 状态寄存器原始值（bit7=忙，bit0=电荷泵使能）。
@@ -511,11 +734,11 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     pub fn recover(&mut self) -> Result<(), DriverError> {
         self.log("正在重置 I2C 总线...");
         self.driver = None;
-        let result: Result<Ssd1309<B>, DriverError> = B::open(self.bus_id, self.addr)
+        let result: Result<Ssd1309<B>, DriverError> = B::open(self.config.bus_id, self.config.addr)
             .map_err(Into::into)
             .and_then(|bus| {
-                let mut driver = Ssd1309::init(bus, self.contrast, self.inverted, self.display_on)
-                    .map_err(DriverError::from)?;
+                let mut driver =
+                    Ssd1309::init_with_config(bus, &self.config).map_err(DriverError::from)?;
                 if self.entire_display_on {
                     driver
                         .set_entire_display_on(true)
@@ -743,6 +966,62 @@ mod tests {
         assert!(w.contains(&Write {
             control: 0x00,
             bytes: vec![0xA5]
+        }));
+    }
+
+    #[test]
+    fn builder_config_chain_sets_fields() {
+        let builder = DisplayBuilder::new(1, 0x3C)
+            .with_contrast(0x40)
+            .with_inverted(true)
+            .with_display_on(false)
+            .with_rotation(DisplayRotation::Rotate180)
+            .with_display_offset(0x02)
+            .with_start_line(0x04)
+            .with_multiplex_ratio(0x2F)
+            .with_clock(0x01, 0x07)
+            .with_precharge_period(0x02, 0x0E)
+            .with_vcomh_level(0x30)
+            .with_com_pins_config(0x02)
+            .with_charge_pump(false);
+        assert_eq!(builder.config.bus_id, 1);
+        assert_eq!(builder.config.addr, 0x3C);
+        assert_eq!(builder.config.contrast, 0x40);
+        assert!(builder.config.inverted);
+        assert!(!builder.config.display_on);
+        assert_eq!(builder.config.rotation, DisplayRotation::Rotate180);
+        assert_eq!(builder.config.display_offset, 0x02);
+        assert_eq!(builder.config.start_line, 0x04);
+        assert_eq!(builder.config.multiplex_ratio, 0x2F);
+        assert_eq!(builder.config.clock_divide_ratio, 0x01);
+        assert_eq!(builder.config.clock_frequency, 0x07);
+        assert_eq!(builder.config.precharge_phase1, 0x02);
+        assert_eq!(builder.config.precharge_phase2, 0x0E);
+        assert_eq!(builder.config.vcomh_level, 0x30);
+        assert_eq!(builder.config.com_pins_config, 0x02);
+        assert!(!builder.config.charge_pump_enabled);
+    }
+
+    #[test]
+    fn recover_preserves_rotation() {
+        let (_log, failures, bus) = new_bus();
+        let mut config = DisplayConfig::new(1, 0x3C);
+        config.rotation = DisplayRotation::Rotate180;
+        let mut display = Display::<MockBus>::from_device(bus, config).unwrap();
+
+        let factory_log = Arc::new(Mutex::new(Vec::new()));
+        MockBus::set_factory(Arc::clone(&factory_log), 0);
+        failures.set(usize::MAX);
+        display.recover().unwrap();
+
+        let w = factory_log.lock().unwrap();
+        assert!(w.contains(&Write {
+            control: 0x00,
+            bytes: vec![0xA0]
+        }));
+        assert!(w.contains(&Write {
+            control: 0x00,
+            bytes: vec![0xC0]
         }));
     }
 

@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use super::framebuffer::{Framebuffer, HEIGHT, WIDTH};
 use super::i2c_bus::I2cDevice;
+use super::{DisplayConfig, DisplayRotation, ScrollDirection};
 
 /// SSD1309 控制器。泛型参数 `B` 为底层 I2C 设备。
 pub struct Ssd1309<B: I2cDevice> {
@@ -20,25 +21,54 @@ pub struct Ssd1309<B: I2cDevice> {
 impl<B: I2cDevice> Ssd1309<B> {
     /// 初始化控制器。`contrast` 初始对比度、`inverted` 初始反色、
     /// `display_on` 初始化完成后是否立即开启显示。
-    pub fn init(mut bus: B, contrast: u8, inverted: bool, display_on: bool) -> io::Result<Self> {
+    ///
+    /// 使用默认旋转和默认高级寄存器参数，等价于
+    /// `init_with_config` 配合 `DisplayConfig::new(0, 0)` 的默认值。
+    pub fn init(bus: B, contrast: u8, inverted: bool, display_on: bool) -> io::Result<Self> {
+        let mut config = DisplayConfig::new(0, 0);
+        config.contrast = contrast;
+        config.inverted = inverted;
+        config.display_on = display_on;
+        Self::init_with_config(bus, &config)
+    }
+
+    /// 按完整配置初始化控制器。
+    pub(crate) fn init_with_config(mut bus: B, config: &DisplayConfig) -> io::Result<Self> {
         bus.write_command(&[0xAE])?; // 关闭显示（休眠模式）
-        bus.write_command(&[0xD5, 0x80])?; // 时钟分频/振荡器频率
-        bus.write_command(&[0xA8, (HEIGHT - 1) as u8])?; // 多路复用比 = 行数-1（64 行 → 0x3F）
-        bus.write_command(&[0xD3, 0x00])?; // 显示偏移 0
-        bus.write_command(&[0x40])?; // 起始行地址 0
-        bus.write_command(&[0x8D, 0x14])?; // 电荷泵使能（内部 DC-DC）
+        let clock = ((config.clock_frequency & 0x0F) << 4) | (config.clock_divide_ratio & 0x0F);
+        bus.write_command(&[0xD5, clock])?; // 时钟分频/振荡器频率
+        bus.write_command(&[0xA8, config.multiplex_ratio])?; // 多路复用比
+        bus.write_command(&[0xD3, config.display_offset])?; // 显示偏移
+        bus.write_command(&[0x40 | (config.start_line & 0x3F)])?; // 起始行地址
+        bus.write_command(&[
+            0x8D,
+            if config.charge_pump_enabled {
+                0x14
+            } else {
+                0x10
+            },
+        ])?; // 电荷泵
         bus.write_command(&[0xAD, 0x8A])?; // SSD1309 DC-DC 转换器（缺少会导致花屏）
         thread::sleep(Duration::from_millis(100));
         bus.write_command(&[0x20, 0x02])?; // 页寻址模式（避免 Pi 5 RP1 大块传输限制）
-        bus.write_command(&[0xA1])?; // 段重映射（水平翻转）
-        bus.write_command(&[0xC8])?; // COM 扫描方向（垂直翻转）
-        bus.write_command(&[0xDA, 0x12])?; // COM 引脚硬件配置（备选布局）
-        bus.write_command(&[0x81, contrast])?; // 对比度
-        bus.write_command(&[0xD9, 0xF1])?; // 预充电周期 1/F1
-        bus.write_command(&[0xDB, 0x40])?; // VCOMH 取消选择级别
+        match config.rotation {
+            DisplayRotation::Rotate0 => {
+                bus.write_command(&[0xA1])?; // 段重映射（水平翻转）
+                bus.write_command(&[0xC8])?; // COM 扫描方向（垂直翻转）
+            }
+            DisplayRotation::Rotate180 => {
+                bus.write_command(&[0xA0])?; // 段重映射关闭
+                bus.write_command(&[0xC0])?; // COM 扫描方向正常
+            }
+        }
+        bus.write_command(&[0xDA, config.com_pins_config])?; // COM 引脚硬件配置
+        bus.write_command(&[0x81, config.contrast])?; // 对比度
+        let precharge = ((config.precharge_phase2 & 0x0F) << 4) | (config.precharge_phase1 & 0x0F);
+        bus.write_command(&[0xD9, precharge])?; // 预充电周期
+        bus.write_command(&[0xDB, config.vcomh_level])?; // VCOMH 取消选择级别
         bus.write_command(&[0xA4])?; // 正常显示模式（非全亮）
-        bus.write_command(&[if inverted { 0xA7 } else { 0xA6 }])?; // 反色/正常
-        if display_on {
+        bus.write_command(&[if config.inverted { 0xA7 } else { 0xA6 }])?; // 反色/正常
+        if config.display_on {
             bus.write_command(&[0xAF])?; // 开启显示
         }
         Ok(Self { bus })
@@ -117,6 +147,98 @@ impl<B: I2cDevice> Ssd1309<B> {
     /// 开启显示（0xAF）。与 `sleep()` 相对。
     pub fn wake(&mut self) -> io::Result<()> {
         self.bus.write_command(&[0xAF])
+    }
+
+    /// 设置旋转方向。
+    ///
+    /// 仅发送段重映射与 COM 扫描方向命令，不清空帧缓冲。
+    pub fn set_rotation(&mut self, rotation: DisplayRotation) -> io::Result<()> {
+        match rotation {
+            DisplayRotation::Rotate0 => {
+                self.bus.write_command(&[0xA1])?;
+                self.bus.write_command(&[0xC8])?;
+            }
+            DisplayRotation::Rotate180 => {
+                self.bus.write_command(&[0xA0])?;
+                self.bus.write_command(&[0xC0])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 设置显示偏移（0-63）。
+    pub fn set_display_offset(&mut self, offset: u8) -> io::Result<()> {
+        self.bus.write_command(&[0xD3, offset & 0x3F])
+    }
+
+    /// 设置起始行地址（0-63）。
+    pub fn set_start_line(&mut self, line: u8) -> io::Result<()> {
+        self.bus.write_command(&[0x40 | (line & 0x3F)])
+    }
+
+    /// 设置多路复用比（行数-1，128×64 面板为 0x3F）。
+    pub fn set_multiplex_ratio(&mut self, ratio: u8) -> io::Result<()> {
+        self.bus.write_command(&[0xA8, ratio])
+    }
+
+    /// 设置时钟分频比与振荡器频率。
+    pub fn set_clock(&mut self, divide_ratio: u8, frequency: u8) -> io::Result<()> {
+        let value = ((frequency & 0x0F) << 4) | (divide_ratio & 0x0F);
+        self.bus.write_command(&[0xD5, value])
+    }
+
+    /// 设置预充电周期。
+    pub fn set_precharge_period(&mut self, phase1: u8, phase2: u8) -> io::Result<()> {
+        let value = ((phase2 & 0x0F) << 4) | (phase1 & 0x0F);
+        self.bus.write_command(&[0xD9, value])
+    }
+
+    /// 设置 VCOMH 取消选择级别。
+    pub fn set_vcomh_level(&mut self, level: u8) -> io::Result<()> {
+        self.bus.write_command(&[0xDB, level])
+    }
+
+    /// 设置 COM 引脚硬件配置。
+    pub fn set_com_pins_config(&mut self, config: u8) -> io::Result<()> {
+        self.bus.write_command(&[0xDA, config])
+    }
+
+    /// 设置电荷泵使能状态。
+    pub fn set_charge_pump(&mut self, enabled: bool) -> io::Result<()> {
+        self.bus
+            .write_command(&[0x8D, if enabled { 0x14 } else { 0x10 }])
+    }
+
+    /// 配置并激活水平硬件滚动。
+    ///
+    /// 注意：当前项目实测屏幕不响应硬件滚动命令；此方法仅为需要验证
+    /// 其他 SSD1309 面板或进行硬件兼容性测试时保留。
+    pub fn hardware_scroll_horizontal(
+        &mut self,
+        dir: ScrollDirection,
+        start_page: u8,
+        end_page: u8,
+        speed: u8,
+    ) -> io::Result<()> {
+        let cmd = match dir {
+            ScrollDirection::Right => 0x26,
+            ScrollDirection::Left => 0x27,
+        };
+        self.bus.write_command(&[
+            cmd,
+            0x00,
+            start_page & 0x07,
+            speed,
+            end_page & 0x07,
+            0x00,
+            0xFF,
+        ])?;
+        self.bus.write_command(&[0x2F])
+    }
+
+    /// 停止硬件滚动。
+    pub fn deactivate_scroll(&mut self) -> io::Result<()> {
+        self.bus.write_command(&[0x2E])
     }
 
     /// 读取状态寄存器（bit7=忙，bit0=电荷泵使能）。
@@ -492,6 +614,175 @@ mod tests {
             Write {
                 control: 0x00,
                 bytes: vec![0xAF]
+            }
+        );
+    }
+
+    #[test]
+    fn init_with_config_rotation_180_writes_flip_commands() {
+        let (log, bus) = mock_bus();
+        let mut config = DisplayConfig::new(0, 0);
+        config.rotation = DisplayRotation::Rotate180;
+        Ssd1309::init_with_config(bus, &config).unwrap();
+        let w = log.lock().unwrap();
+        assert!(w.contains(&Write {
+            control: 0x00,
+            bytes: vec![0xA0]
+        }));
+        assert!(w.contains(&Write {
+            control: 0x00,
+            bytes: vec![0xC0]
+        }));
+        assert!(!w.contains(&Write {
+            control: 0x00,
+            bytes: vec![0xA1]
+        }));
+    }
+
+    #[test]
+    fn set_rotation_writes_expected_commands() {
+        let (log, bus) = mock_bus();
+        let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
+        let init_count = log.lock().unwrap().len();
+
+        ssd.set_rotation(DisplayRotation::Rotate180).unwrap();
+        ssd.set_rotation(DisplayRotation::Rotate0).unwrap();
+
+        let w = writes_after_init(&log, init_count);
+        assert_eq!(
+            w[0],
+            Write {
+                control: 0x00,
+                bytes: vec![0xA0]
+            }
+        );
+        assert_eq!(
+            w[1],
+            Write {
+                control: 0x00,
+                bytes: vec![0xC0]
+            }
+        );
+        assert_eq!(
+            w[2],
+            Write {
+                control: 0x00,
+                bytes: vec![0xA1]
+            }
+        );
+        assert_eq!(
+            w[3],
+            Write {
+                control: 0x00,
+                bytes: vec![0xC8]
+            }
+        );
+    }
+
+    #[test]
+    fn hardware_scroll_writes_expected_commands() {
+        let (log, bus) = mock_bus();
+        let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
+        let init_count = log.lock().unwrap().len();
+
+        ssd.hardware_scroll_horizontal(ScrollDirection::Right, 0, 7, 0x00)
+            .unwrap();
+        ssd.deactivate_scroll().unwrap();
+
+        let w = writes_after_init(&log, init_count);
+        assert_eq!(
+            w[0],
+            Write {
+                control: 0x00,
+                bytes: vec![0x26, 0x00, 0x00, 0x00, 0x07, 0x00, 0xFF]
+            }
+        );
+        assert_eq!(
+            w[1],
+            Write {
+                control: 0x00,
+                bytes: vec![0x2F]
+            }
+        );
+        assert_eq!(
+            w[2],
+            Write {
+                control: 0x00,
+                bytes: vec![0x2E]
+            }
+        );
+    }
+
+    #[test]
+    fn advanced_setters_write_expected_commands() {
+        let (log, bus) = mock_bus();
+        let mut ssd = Ssd1309::init(bus, 0xCF, false, true).unwrap();
+        let init_count = log.lock().unwrap().len();
+
+        ssd.set_display_offset(0x10).unwrap();
+        ssd.set_start_line(0x20).unwrap();
+        ssd.set_multiplex_ratio(0x2F).unwrap();
+        ssd.set_clock(0x01, 0x07).unwrap();
+        ssd.set_precharge_period(0x02, 0x0E).unwrap();
+        ssd.set_vcomh_level(0x30).unwrap();
+        ssd.set_com_pins_config(0x02).unwrap();
+        ssd.set_charge_pump(false).unwrap();
+
+        let w = writes_after_init(&log, init_count);
+        assert_eq!(
+            w[0],
+            Write {
+                control: 0x00,
+                bytes: vec![0xD3, 0x10]
+            }
+        );
+        assert_eq!(
+            w[1],
+            Write {
+                control: 0x00,
+                bytes: vec![0x40 | 0x20]
+            }
+        );
+        assert_eq!(
+            w[2],
+            Write {
+                control: 0x00,
+                bytes: vec![0xA8, 0x2F]
+            }
+        );
+        assert_eq!(
+            w[3],
+            Write {
+                control: 0x00,
+                bytes: vec![0xD5, 0x71]
+            }
+        );
+        assert_eq!(
+            w[4],
+            Write {
+                control: 0x00,
+                bytes: vec![0xD9, 0xE2]
+            }
+        );
+        assert_eq!(
+            w[5],
+            Write {
+                control: 0x00,
+                bytes: vec![0xDB, 0x30]
+            }
+        );
+        assert_eq!(
+            w[6],
+            Write {
+                control: 0x00,
+                bytes: vec![0xDA, 0x02]
+            }
+        );
+        assert_eq!(
+            w[7],
+            Write {
+                control: 0x00,
+                bytes: vec![0x8D, 0x10]
             }
         );
     }

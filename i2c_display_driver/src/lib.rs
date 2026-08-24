@@ -4,8 +4,9 @@
 //!
 //! # 能力概览
 //!
-//! * [`display::Display`] — 顶层句柄：打开/推帧/局部推帧/自动恢复/对比度/反色/休眠/唤醒/水平与垂直滚动
-//! * [`display::DisplayConfig`] — 可配置初始化（总线、地址、初始对比度/反色/显示开关）
+//! * [`display::Display`] — 顶层句柄：打开/推帧/局部推帧/自动恢复/对比度/反色/休眠/唤醒/水平与垂直滚动/旋转/高级寄存器控制
+//! * [`display::DisplayBuilder`] — 链式初始化配置
+//! * [`display::DisplayConfig`] — 可配置初始化（总线、地址、对比度/反色/显示开关/旋转/高级寄存器）
 //! * [`display::Framebuffer`] — 1-bit 帧缓冲（含脏矩形跟踪），实现 embedded-graphics `DrawTarget`
 //! * [`display::DriverStats`] — 运行统计（帧数/错误数/恢复次数）
 //! * [`graphics`] — 文字（5×7）与基础图形绘制
