@@ -2,6 +2,8 @@
 
 面向 Linux I2C 子系统的 **SSD1309 OLED 显示屏驱动库**（Rust，128×64 单色），为树莓派等嵌入式设备提供完整的显示能力。
 
+同时提供纯 Python 版驱动，便于 Python 程序直接使用，见 [`python_driver/`](python_driver/README.md)。
+
 ## 特性
 
 - **帧缓冲**：1024 字节 1-bit 帧缓冲（8 页 × 128 列），实现 `embedded-graphics` `DrawTarget`，可接收矩形/圆/文字/图像等原语
@@ -9,6 +11,9 @@
 - **文字与图形**：内嵌 5×7 位图字体（含 `°`/`↑`/`↓`），矩形/直线/圆/三角形等基础图形
 - **位图 blit**：`Framebuffer::blit` 绘制任意线性 1-bit 位图（含覆盖/点亮两种模式），便于自绘字形/图标
 - **软件滚动**：水平/垂直循环滚动（帧缓冲平移），跑马灯效果
+- **旋转支持**：0°/180° 硬件方向切换，适配屏幕安装方向
+- **高级寄存器调节**：显示偏移、起始行、多路复用比、时钟、预充电、VCOMH、COM 引脚、电荷泵
+- **硬件滚动命令封装**：保留 SSD1309 硬件滚动命令入口，默认仍使用软件滚动
 - **多页显示**：`PageBuffer` 多页管理，瞬时/滚动动画两种翻页形式
 - **可靠显示**：`render_robust()` 自动恢复 I2C 总线（失败后冷却退避），恢复后沿用对比度/反色/显示开关等设置；逐页推帧规避 Pi 5 RP1 大块传输限制
 - **状态读取**：`read_status()` 读取 SSD1309 状态寄存器（忙/电荷泵），辅助故障诊断
@@ -72,6 +77,51 @@ display.software_scroll_vertical(VerticalDirection::Up, 1)?;    // 内容循环�
 
 滚动为循环语义（移出屏幕的内容从另一侧进入）。注意：I2C 总线 100kHz 下每帧全推约 100ms，滚动帧率上限约 8-10 帧/秒，属预期表现。
 
+### 旋转与初始化 Builder
+
+```rust
+use i2c_display_driver::display::{DisplayBuilder, DisplayRotation};
+
+let mut display = DisplayBuilder::new(1, 0x3C)
+    .with_contrast(0xCF)
+    .with_inverted(false)
+    .with_display_on(true)
+    .with_rotation(DisplayRotation::Rotate180)
+    .build()?;
+```
+
+运行时也可以通过 `set_rotation()` 切换 0°/180°：
+
+```rust
+display.set_rotation(DisplayRotation::Rotate180)?;
+```
+
+### 高级显示控制
+
+以下方法可直接调节 SSD1309 寄存器，并会在 `recover()` 后保持：
+
+```rust
+display.set_display_offset(0)?;
+display.set_start_line(0)?;
+display.set_multiplex_ratio(0x3F)?;
+display.set_clock(0, 8)?;
+display.set_precharge_period(0x01, 0x0F)?;
+display.set_vcomh_level(0x40)?;
+display.set_com_pins_config(0x12)?;
+display.set_charge_pump(true)?;
+```
+
+### 硬件滚动（兼容性入口）
+
+当前项目实测屏幕不响应硬件滚动命令，因此日常滚动请使用软件滚动。这里保留硬件滚动命令封装，便于在其他 SSD1309 面板上验证或调试：
+
+```rust
+use i2c_display_driver::display::ScrollDirection;
+
+display.hardware_scroll_horizontal(ScrollDirection::Left, 0, 7, 0x00)?;
+display.deactivate_scroll()?;
+```
+
 ### 多页显示
 
 `PageBuffer` 管理多个独立页面，页面内容在切换间保留：
@@ -122,6 +172,7 @@ println!("推帧 {} 次，跳过 {} 帧，恢复 {} 次，错误 {} 次",
 | `smoke` | 冒烟测试：文字 + 基础图形 + 推帧 |
 | `showcase` | 全功能循环演示（文字/图形/日志/反色/对比度） |
 | `feature_check` | 新功能验证：clear/fill/全屏点亮/局部推帧/滚动/recover/统计 |
+| `panel_tuning` | 面板方向与高级参数演示：Rotate0/180、寄存器调节、硬件滚动兼容入口 |
 | `diag` | 硬件诊断 + 软件滚动演示 |
 | `scroll_demo` | 长文本跑马灯 + 垂直滚动演示 |
 | `page_demo` | 多页仪表：瞬时与滚动动画两种翻页对比 |

@@ -8,7 +8,7 @@ Rust 库驱动 SSD1309 I2C OLED（128×64 单色），仅面向 Linux。crate �
 - `src/display/` — `i2c_bus`、`ssd1309`、`framebuffer`、`mock`（仅测试编译），顶层句柄在 `mod.rs`
 - `src/graphics/` — 5×7 `font`、`text`、`canvas`（基础图形）
 - `src/error.rs` — 统一 `DriverError`
-- `examples/` — 硬件演示：`smoke`、`showcase`、`feature_check`、`diag`、`scroll_demo`、`page_demo`、`selftest`、`stress`
+- `examples/` — 硬件演示：`smoke`、`showcase`、`feature_check`、`panel_tuning`、`diag`、`scroll_demo`、`page_demo`、`selftest`、`stress`
 - 测试位于 `#[cfg(test)]` 模块（与被测代码相邻）；字体数据内嵌于 `font.rs`（无资源文件）
 
 分层结构（自底向上）：
@@ -35,6 +35,7 @@ cargo fmt --check            # 格式检查（要求通过）
 cargo run --example smoke          # 冒烟：文字 + 基础图形 + 推帧
 cargo run --example showcase       # 全功能循环演示（文字/图形/日志/反色/对比度）
 cargo run --example feature_check  # 新功能验证（clear/fill/全屏点亮/局部推帧/软件滚动/recover/统计）
+cargo run --example panel_tuning  # 面板方向与高级参数演示（Rotate0/180、寄存器调节、硬件滚动兼容入口）
 cargo run --example diag           # 硬件诊断 + 软件滚动演示
 cargo run --example scroll_demo    # 长文本跑马灯 + 垂直滚动演示
 cargo run --example page_demo      # 多页仪表：瞬时与滚动动画两种翻页对比
