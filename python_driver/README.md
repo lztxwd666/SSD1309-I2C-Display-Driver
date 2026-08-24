@@ -1,7 +1,5 @@
 # SSD1309 纯 Python 驱动
 
-将 Rust 驱动功能全量迁移到 Python，供同事直接使用。
-
 ## 虚拟环境安装
 
 ```bash
@@ -78,6 +76,6 @@ python examples/usage.py
 pip install -e .
 ```
 
-它让 `ssd1309_driver` 变成可安装包，同事在虚拟环境中安装后可以在任何目录直接 `import ssd1309_driver`。
+它让 `ssd1309_driver` 变成可安装包，在虚拟环境中安装后可以在任何目录直接 `import ssd1309_driver`。
 
-如果不使用 `pyproject.toml`，也可以直接把 `ssd1309_driver` 目录放到项目里并设置 `PYTHONPATH`，但那样不利于同事安装和版本管理，因此保留该文件。
+如果不使用 `pyproject.toml`，也可以直接把 `ssd1309_driver` 目录放到项目里并设置 `PYTHONPATH`

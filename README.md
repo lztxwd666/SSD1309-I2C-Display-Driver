@@ -2,7 +2,7 @@
 
 面向 Linux I2C 子系统的 **SSD1309 OLED 显示屏驱动库**（Rust，128×64 单色），为树莓派等嵌入式设备提供完整的显示能力。
 
-同时提供纯 Python 版驱动，便于 Python 程序直接使用，见 [`python_driver/`](python_driver/README.md)。
+同时提供纯 Python 版驱动，见 [`python_driver/`](python_driver/README.md)。
 
 ## 特性
 
@@ -113,7 +113,7 @@ display.set_charge_pump(true)?;
 
 ### 硬件滚动（兼容性入口）
 
-当前项目实测屏幕不响应硬件滚动命令，因此日常滚动请使用软件滚动。这里保留硬件滚动命令封装，便于在其他 SSD1309 面板上验证或调试：
+当前项目实测屏幕不响应硬件滚动命令，日常滚动请使用软件滚动。这里保留硬件滚动命令封装，用于其他 SSD1309 面板验证或调试：
 
 ```rust
 use i2c_display_driver::display::ScrollDirection;
