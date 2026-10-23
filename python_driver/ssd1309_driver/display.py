@@ -290,12 +290,16 @@ class Display:
         self._require_driver().set_charge_pump(enabled)
         self.config.charge_pump_enabled = enabled
 
-    def software_scroll_horizontal(self, direction: ScrollDirection, offset: int) -> None:
+    def software_scroll_horizontal(
+        self, direction: ScrollDirection, offset: int
+    ) -> None:
         Display._scroll_horizontal_bits(self.framebuffer.buffer, direction, offset)
         self.framebuffer.mark_all_dirty()
         self.render()
 
-    def software_scroll_vertical(self, direction: VerticalDirection, offset: int) -> None:
+    def software_scroll_vertical(
+        self, direction: VerticalDirection, offset: int
+    ) -> None:
         Display._scroll_vertical_bits(self.framebuffer.buffer, direction, offset)
         self.framebuffer.mark_all_dirty()
         self.render()
@@ -307,7 +311,9 @@ class Display:
         end_page: int,
         speed: int,
     ) -> None:
-        self._require_driver().hardware_scroll_horizontal(direction, start_page, end_page, speed)
+        self._require_driver().hardware_scroll_horizontal(
+            direction, start_page, end_page, speed
+        )
 
     def deactivate_scroll(self) -> None:
         self._require_driver().deactivate_scroll()
@@ -331,7 +337,9 @@ class Display:
         src, _ = self._scroll_source
         k = min(k, steps)
         offset = k * WIDTH // steps
-        Display._blend_scroll_frame(self.framebuffer.buffer, src, bytes(page.buffer), offset)
+        Display._blend_scroll_frame(
+            self.framebuffer.buffer, src, bytes(page.buffer), offset
+        )
         self.framebuffer.mark_all_dirty()
         self.render()
         if k >= steps:
@@ -370,20 +378,24 @@ class Display:
         return self._driver
 
     @staticmethod
-    def _scroll_horizontal_bits(buffer: bytearray, direction: ScrollDirection, offset: int) -> None:
+    def _scroll_horizontal_bits(
+        buffer: bytearray, direction: ScrollDirection, offset: int
+    ) -> None:
         offset %= WIDTH
         if offset == 0:
             return
         for page in range(HEIGHT // 8):
             start = page * WIDTH
-            row = buffer[start:start + WIDTH]
+            row = buffer[start : start + WIDTH]
             if direction == ScrollDirection.RIGHT:
-                buffer[start:start + WIDTH] = row[-offset:] + row[:-offset]
+                buffer[start : start + WIDTH] = row[-offset:] + row[:-offset]
             else:
-                buffer[start:start + WIDTH] = row[offset:] + row[:offset]
+                buffer[start : start + WIDTH] = row[offset:] + row[:offset]
 
     @staticmethod
-    def _scroll_vertical_bits(buffer: bytearray, direction: VerticalDirection, offset: int) -> None:
+    def _scroll_vertical_bits(
+        buffer: bytearray, direction: VerticalDirection, offset: int
+    ) -> None:
         offset %= HEIGHT
         if offset == 0:
             return
@@ -399,7 +411,9 @@ class Display:
                 buffer[page * WIDTH + col] = (v >> (page * 8)) & 0xFF
 
     @staticmethod
-    def _blend_scroll_frame(dst: bytearray, src: bytes, new: bytes, offset: int) -> None:
+    def _blend_scroll_frame(
+        dst: bytearray, src: bytes, new: bytes, offset: int
+    ) -> None:
         offset = min(offset, WIDTH)
         for page in range(HEIGHT // 8):
             base = page * WIDTH

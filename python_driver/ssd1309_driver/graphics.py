@@ -318,7 +318,11 @@ def fill_triangle(
         return
     for y in range(y_start, y_end + 1):
         left = _interpolate_x(ax, ay, cx, cy, y)
-        right = _interpolate_x(ax, ay, bx, by, y) if y < by else _interpolate_x(bx, by, cx, cy, y)
+        right = (
+            _interpolate_x(ax, ay, bx, by, y)
+            if y < by
+            else _interpolate_x(bx, by, cx, cy, y)
+        )
         if left > right:
             left, right = right, left
         _fill_row(fb, left, right, y)

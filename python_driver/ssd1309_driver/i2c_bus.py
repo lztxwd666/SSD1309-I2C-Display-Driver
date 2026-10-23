@@ -28,7 +28,9 @@ class I2cBus:
             fcntl.ioctl(fd, I2C_SLAVE, self.addr)
         except OSError as e:
             os.close(fd)
-            raise I2cError(f"无法打开 I2C 设备 {path} 或设置从机地址 {self.addr:#x}", e) from e
+            raise I2cError(
+                f"无法打开 I2C 设备 {path} 或设置从机地址 {self.addr:#x}", e
+            ) from e
         self._fd = fd
         return self
 

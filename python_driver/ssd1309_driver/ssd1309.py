@@ -109,7 +109,7 @@ class Ssd1309:
             self.bus.write_command(bytes([0xB0 | page]))
             self.bus.write_command(bytes([0x00, 0x10]))
             start = page * WIDTH
-            self.bus.write_data(data[start:start + WIDTH])
+            self.bus.write_data(data[start : start + WIDTH])
 
     def render_region(self, fb: Framebuffer, x: int, y: int, w: int, h: int) -> None:
         """局部推帧"""
@@ -130,7 +130,7 @@ class Ssd1309:
             col_high = 0x10 | ((x >> 4) & 0x07)
             self.bus.write_command(bytes([col_low, col_high]))
             start = page * WIDTH + x
-            self.bus.write_data(data[start:start + w])
+            self.bus.write_data(data[start : start + w])
 
     def set_contrast(self, val: int) -> None:
         self.bus.write_command(bytes([0x81, val]))
