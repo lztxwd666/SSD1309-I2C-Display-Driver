@@ -9,6 +9,7 @@ from .display import (
 )
 from .errors import (
     DriverError,
+    FrameRejectedError,
     I2cError,
     InvalidDataError,
     NotInitializedError,
@@ -41,6 +42,7 @@ __all__ = [
     "DisplayConfig",
     "DisplayRotation",
     "DriverError",
+    "FrameRejectedError",
     "I2cError",
     "InvalidDataError",
     "NotInitializedError",

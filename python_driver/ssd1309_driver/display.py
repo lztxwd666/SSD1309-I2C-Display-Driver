@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
 
-from .errors import DriverError, NotInitializedError
+from .errors import DriverError, FrameRejectedError, NotInitializedError
 from .framebuffer import Framebuffer, PageBuffer, WIDTH, HEIGHT
 from .i2c_bus import I2cBus
 from .ssd1309 import DisplayRotation, ScrollDirection, VerticalDirection, Ssd1309
@@ -29,6 +29,8 @@ class DriverStats:
     frames_skipped: int = 0
     recoveries: int = 0
     errors: int = 0
+    # 推帧路径被接收端 NACK 拒绝的帧数（长度或 CRC 校验失败）
+    frames_rejected: int = 0
 
 
 @dataclass
@@ -166,9 +168,13 @@ class Display:
             self._driver.push_frame(self.framebuffer)
             self.stats.frames_pushed += 1
             self.framebuffer.clear_dirty()
+        except FrameRejectedError:
+            self.stats.errors += 1
+            self.stats.frames_rejected += 1
+            raise
         except Exception as e:
             self.stats.errors += 1
-            raise DriverError(str(e)) from e
+            raise DriverError(str(e), e) from e
 
     def render_region(self, x: int, y: int, w: int, h: int) -> None:
         if w == 0 or h == 0 or x >= WIDTH or y >= HEIGHT:
@@ -183,9 +189,13 @@ class Display:
                 dx, dy, dw, dh = dirty
                 if x <= dx and y <= dy and x + w >= dx + dw and y + h >= dy + dh:
                     self.framebuffer.clear_dirty()
+        except FrameRejectedError:
+            self.stats.errors += 1
+            self.stats.frames_rejected += 1
+            raise
         except Exception as e:
             self.stats.errors += 1
-            raise DriverError(str(e)) from e
+            raise DriverError(str(e), e) from e
 
     def render_dirty(self) -> None:
         dirty = self.framebuffer.dirty_rect()
@@ -198,6 +208,10 @@ class Display:
             return RenderStatus.OK
         except DriverError as e:
             self._log(f"帧推送失败: {e}")
+            # 接收端 NACK 属于帧校验失败，不是总线故障：跳过本帧，不重置总线。
+            if isinstance(e, FrameRejectedError):
+                self.stats.frames_skipped += 1
+                return RenderStatus.SKIPPED
             if self._recover_in_cooldown():
                 self.stats.frames_skipped += 1
                 return RenderStatus.SKIPPED

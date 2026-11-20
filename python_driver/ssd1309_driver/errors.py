@@ -21,6 +21,10 @@ class I2cError(DriverError):
     """I2C 通信错误。"""
 
 
+class FrameRejectedError(I2cError):
+    """接收端 NACK 拒绝写入帧（长度或 CRC 校验失败），或响应帧校验失败。"""
+
+
 class NotInitializedError(DriverError):
     """驱动未初始化。"""
 
