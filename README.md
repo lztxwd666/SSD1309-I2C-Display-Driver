@@ -16,8 +16,9 @@
 - **硬件滚动命令封装**：保留 SSD1309 硬件滚动命令入口，默认仍使用软件滚动
 - **多页显示**：`PageBuffer` 多页管理，瞬时/滚动动画两种翻页形式
 - **可靠显示**：`render_robust()` 自动恢复 I2C 总线（失败后冷却退避），恢复后沿用对比度/反色/显示开关等设置；逐页推帧规避 Pi 5 RP1 大块传输限制
+- **I2C 帧校验与 NACK 反馈**：所有写帧带 1 字节长度字段与 Modbus CRC16（低字节在前）；接收端在末字节 NACK 时发送端自动重试 2 次并上报 `FrameRejected`；对端要求见 [接收端协议规范](docs/i2c-crc-protocol.md)
 - **状态读取**：`read_status()` 读取 SSD1309 状态寄存器（忙/电荷泵），辅助故障诊断
-- **可观测性**：运行统计（推帧数/错误数/恢复次数）、日志回调
+- **可观测性**：运行统计（推帧数/错误数/恢复次数/帧拒绝数）、日志回调
 - **无硬件测试**：记录型 `MockBus` 验证命令序列，测试全部离线运行（含长稳故障注入测试）
 
 ## 快速开始
@@ -161,23 +162,40 @@ let status = display.render_robust();
 
 // 运行统计
 let s = display.stats();
-println!("推帧 {} 次，跳过 {} 帧，恢复 {} 次，错误 {} 次",
-    s.frames_pushed, s.frames_skipped, s.recoveries, s.errors);
+println!("推帧 {} 次，跳过 {} 帧，恢复 {} 次，拒绝 {} 帧，错误 {} 次",
+    s.frames_pushed, s.frames_skipped, s.recoveries, s.frames_rejected, s.errors);
 ```
+
+### I2C 帧校验（Modbus CRC16）
+
+所有经 `I2cBus` 发出的写帧格式为“控制字节 + 1 字节载荷长度 + 载荷 + 2 字节 Modbus CRC16”（低字节在前），CRC 覆盖控制字节、长度字节与载荷：
+
+| 帧类型     | 线上字节                                         | CRC 覆盖                     |
+| ---------- | ------------------------------------------------ | ---------------------------- |
+| 命令帧     | `0x00` + `len` + 命令载荷 + `CRC_L` + `CRC_H`    | `0x00` + `len` + 命令载荷    |
+| 数据帧     | `0x40` + `len` + GDDRAM 数据 + `CRC_L` + `CRC_H` | `0x40` + `len` + GDDRAM 数据 |
+| 状态读请求 | `0x00` + `0x00` + `CRC_L` + `CRC_H`              | `0x00` + `0x00`              |
+| 状态读响应 | 状态字节 + `CRC_L` + `CRC_H`（主机读 3 字节）    | 状态字节                     |
+
+CRC 参数与 Modbus RTU 一致：多项式 0x8005（反射值 0xA001）、初值 0xFFFF、输入/输出反射、最终不取反；标准检查值 `"123456789"` = 0x4B37。例如命令 `0xAE` 的线上帧为 `00 01 AE F1 EC`，状态读请求为 `00 00 01 B0`。
+
+接收端根据长度字节确定帧尾，在最后一个字节（`CRC_H`）的 ACK 周期校验长度与 CRC；失败时 NACK。Linux i2c-dev 将数据 NACK 映射为 `EREMOTEIO`，`I2cBus` 对 NACK 最多重试 2 次，仍失败返回 `DriverError::FrameRejected`（Python 为 `FrameRejectedError`）；调用方可用 `err.is_frame_rejected()`（Rust）或捕获 `FrameRejectedError`（Python）区分帧校验失败与其他 I/O 错误。`render_robust()` 只跳过该帧并计入 `frames_rejected`，不重置 I2C 总线。
+
+该格式为协议 v2；此前的 v1（无长度字段、状态读请求 3 字节）不兼容，驱动与对端必须同时升级。原生 SSD1309 面板不识别长度字节与校验字节，必须由 I2C 对端按同一协议解析、校验并剥离后再转发给面板。完整帧定义、接收端处理流程、C/Python 参考实现与一致性测试向量见 [docs/i2c-crc-protocol.md](docs/i2c-crc-protocol.md)；给对端开发者的精简适配版见 [docs/i2c-crc-quickstart.md](docs/i2c-crc-quickstart.md)。
 
 ## 示例
 
-| 示例 | 用途 |
-|------|------|
-| `smoke` | 冒烟测试：文字 + 基础图形 + 推帧 |
-| `showcase` | 全功能循环演示（文字/图形/日志/反色/对比度） |
-| `feature_check` | 新功能验证：clear/fill/全屏点亮/局部推帧/滚动/recover/统计 |
-| `panel_tuning` | 面板方向与高级参数演示：Rotate0/180、寄存器调节、硬件滚动兼容入口 |
-| `diag` | 硬件诊断 + 软件滚动演示 |
-| `scroll_demo` | 长文本跑马灯 + 垂直滚动演示 |
-| `page_demo` | 多页仪表：瞬时与滚动动画两种翻页对比 |
-| `selftest` | 硬件自检：一键验证全链路（状态/全亮/字符表/滚动/翻页/统计） |
-| `stress` | 长稳压力测试：长时间循环覆盖全部功能路径（可配置轮数） |
+| 示例            | 用途                                                              |
+| --------------- | ----------------------------------------------------------------- |
+| `smoke`         | 冒烟测试：文字 + 基础图形 + 推帧                                  |
+| `showcase`      | 全功能循环演示（文字/图形/日志/反色/对比度）                      |
+| `feature_check` | 新功能验证：clear/fill/全屏点亮/局部推帧/滚动/recover/统计        |
+| `panel_tuning`  | 面板方向与高级参数演示：Rotate0/180、寄存器调节、硬件滚动兼容入口 |
+| `diag`          | 硬件诊断 + 软件滚动演示                                           |
+| `scroll_demo`   | 长文本跑马灯 + 垂直滚动演示                                       |
+| `page_demo`     | 多页仪表：瞬时与滚动动画两种翻页对比                              |
+| `selftest`      | 硬件自检：一键验证全链路（状态/全亮/字符表/滚动/翻页/统计）       |
+| `stress`        | 长稳压力测试：长时间循环覆盖全部功能路径（可配置轮数）            |
 
 ```bash
 cargo run --example smoke
@@ -191,6 +209,7 @@ src/
 ├── error.rs         统一错误类型 DriverError
 └── display/
     ├── i2c_bus.rs   I2C 设备抽象（I2cDevice 读写 / I2cDeviceFactory）+ Linux 实现
+    ├── crc.rs       Modbus CRC16 帧校验（低字节在前）
     ├── ssd1309.rs   SSD1309 控制器：初始化 / 逐页推帧 / 局部推帧 / 显示控制 / 状态读取
     ├── framebuffer.rs 1-bit 帧缓冲 + 脏矩形 + blit 位图 + PageBuffer
     ├── mock.rs      记录型 MockBus（仅测试编译）
@@ -202,6 +221,8 @@ src/
 ```
 
 分层设计：`I2cDevice` trait 抽象底层总线（真机 `I2cBus`，测试注入 `MockBus`），`Display<B>` 泛型于设备类型——测试无需硬件即可验证完整命令序列。
+
+I2C 帧格式与对端实现要求见 [docs/i2c-crc-protocol.md](docs/i2c-crc-protocol.md)。
 
 ## 平台要求
 

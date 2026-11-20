@@ -5,15 +5,16 @@ Rust 库驱动 SSD1309 I2C OLED（128×64 单色），仅面向 Linux。crate �
 ## 项目结构与模块组织
 
 - `src/lib.rs` — 公开 `display`、`error`、`graphics` 三个模块
-- `src/display/` — `i2c_bus`、`ssd1309`、`framebuffer`、`mock`（仅测试编译），顶层句柄在 `mod.rs`
+- `src/display/` — `i2c_bus`、`ssd1309`、`framebuffer`、`crc`（Modbus CRC16 帧校验）、`mock`（仅测试编译），顶层句柄在 `mod.rs`
 - `src/graphics/` — 5×7 `font`、`text`、`canvas`（基础图形）
 - `src/error.rs` — 统一 `DriverError`
 - `examples/` — 硬件演示：`smoke`、`showcase`、`feature_check`、`panel_tuning`、`diag`、`scroll_demo`、`page_demo`、`selftest`、`stress`
+- `docs/` — 对端协议规范：`i2c-crc-protocol.md`（完整）、`i2c-crc-quickstart.md`（精简适配版）
 - 测试位于 `#[cfg(test)]` 模块（与被测代码相邻）；字体数据内嵌于 `font.rs`（无资源文件）
 
 分层结构（自底向上）：
 
-1. **`i2c_bus.rs`** — `I2cDevice` trait（命令 0x00 / 数据 0x40 双通道写入）+ `I2cDeviceFactory` trait（按总线/地址重建设备，供 recover 使用）。`I2cBus` 为 Linux `/dev/i2c-N` 实现。
+1. **`i2c_bus.rs`** — `I2cDevice` trait（命令 0x00 / 数据 0x40 双通道写入）+ `I2cDeviceFactory` trait（按总线/地址重建设备，供 recover 使用）。`I2cBus` 为 Linux `/dev/i2c-N` 实现，写帧带长度字段与 Modbus CRC16，接收端 NACK 时重试并上报（CRC 计算在 `crc.rs`，帧格式见 `docs/i2c-crc-protocol.md`）。
 2. **`ssd1309.rs`** — `Ssd1309<B>` 控制器驱动：初始化序列、`push_frame`（逐页推 1024 字节）、`render_region`（局部推帧）、对比度/反色/休眠/唤醒。初始化含 SSD1309 特有 DC-DC 命令（`0xAD 0x8A`）。
 3. **`framebuffer.rs`** — 1-bit 帧缓冲，布局 `buffer[page * 128 + col]`：**每字节是一列 8 个垂直像素**（bit0=顶部）。实现 embedded-graphics `DrawTarget`，自动脏矩形跟踪。
 4. **`display/mod.rs`** — `Display<B>` 顶层句柄（泛型参数为底层 I2C 设备，默认 `I2cBus`，测试注入 `MockBus`）：推帧/局部推帧/自动恢复（`render_robust`）/统计/日志回调/软件滚动。`recover()` 关闭并重开 I2C 连接再重初始化。
@@ -54,6 +55,7 @@ cargo test -- --ignored            # 长稳自动化测试（MockBus 故障注�
 - **I2C 总线 100kHz**（总线上挂载其他设备，勿改为 400kHz）：全帧推 1024 字节 ≈ 100ms，软件滚动帧率上限约 8-10 帧/秒——这是预期值，不是 bug。
 - **页寻址模式**（`0x20 0x02`）是刻意选择，规避 Pi 5 RP1 I2C 控制器的大块传输限制。
 - `render_region` 只清除被本次推送完全覆盖的脏矩形，未覆盖部分保留（避免局部推帧丢失更新）。
+- **I2C 帧 v2（长度字段 + 末字节 NACK）**：写帧为控制字节 + `len` + 载荷 + Modbus CRC16（低字节在前）；接收端在 `CRC_H` 的 ACK 周期校验失败时 NACK。`I2cBus` 对数据 NACK（Linux `EREMOTEIO`）重试 2 次，仍失败报 `DriverError::FrameRejected`；`render_robust` 跳过该帧、不触发 `recover`。状态读请求 4 字节，状态读响应 3 字节。原生 SSD1309 不识别长度/校验字节，必须由对端剥离；帧格式变更需两端同步。规范见 `docs/i2c-crc-protocol.md`。
 
 ## 关键约定
 
@@ -71,7 +73,7 @@ cargo test -- --ignored            # 长稳自动化测试（MockBus 故障注�
 
 ## 测试规范
 
-优先使用 `MockBus` 编写 `#[cfg(test)]` 模块内的单元测试，无硬件时也必须通过。覆盖帧缓冲像素写入、脏矩形跟踪、驱动命令序列。保持 clippy 告警清零。
+优先使用 `MockBus` 编写 `#[cfg(test)]` 模块内的单元测试，无硬件时也必须通过。覆盖帧缓冲像素写入、脏矩形跟踪、驱动命令序列、Modbus CRC16 帧字节、NACK 重试与帧拒绝统计。保持 clippy 告警清零。
 
 ## 提交与 PR 规范
 
