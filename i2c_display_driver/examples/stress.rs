@@ -74,8 +74,8 @@ fn main() -> Result<(), DriverError> {
         if i % 100 == 0 && i > 0 {
             let s = display.stats();
             println!(
-                "  第 {} 轮：推帧 {}，错误 {}，跳过 {}，恢复 {}",
-                i, s.frames_pushed, s.errors, s.frames_skipped, s.recoveries
+                "  第 {} 轮：推帧 {}，错误 {}，跳过 {}，帧拒绝 {}，恢复 {}",
+                i, s.frames_pushed, s.errors, s.frames_skipped, s.frames_rejected, s.recoveries
             );
         }
         thread::sleep(Duration::from_millis(FRAME_MS));
@@ -84,8 +84,8 @@ fn main() -> Result<(), DriverError> {
     let s = display.stats();
     println!("\n[压力测试] 完成 {} 轮", rounds);
     println!(
-        "  总计：推帧 {}，错误 {}，跳过 {}，恢复 {}",
-        s.frames_pushed, s.errors, s.frames_skipped, s.recoveries
+        "  总计：推帧 {}，错误 {}，跳过 {}，帧拒绝 {}，恢复 {}",
+        s.frames_pushed, s.errors, s.frames_skipped, s.frames_rejected, s.recoveries
     );
     println!("  评估：错误>0 但恢复成功属正常（I2C 偶发故障被恢复）；错误持续增长需检查硬件");
     Ok(())

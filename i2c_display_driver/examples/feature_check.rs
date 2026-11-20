@@ -87,8 +87,8 @@ fn main() -> Result<(), DriverError> {
     let s = display.stats();
     println!("\n=== 统计（预期：推帧数 66 = 基础 6 + 软件滚动 60，其余为 0）===");
     println!(
-        "  推帧数: {}，跳过帧: {}，恢复次数: {}，错误: {}",
-        s.frames_pushed, s.frames_skipped, s.recoveries, s.errors
+        "  推帧数: {}，跳过帧: {}，恢复次数: {}，帧拒绝: {}，错误: {}",
+        s.frames_pushed, s.frames_skipped, s.recoveries, s.frames_rejected, s.errors
     );
     println!("\n验证结束，屏幕保持显示 FEATURES OK");
     Ok(())

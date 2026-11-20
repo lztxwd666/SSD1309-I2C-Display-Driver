@@ -80,8 +80,8 @@ fn main() -> Result<(), DriverError> {
     // 6. 统计
     let s = display.stats();
     println!(
-        "[6/6] 运行统计：推帧 {}，错误 {}，跳过 {}，恢复 {}",
-        s.frames_pushed, s.errors, s.frames_skipped, s.recoveries
+        "[6/6] 运行统计：推帧 {}，错误 {}，跳过 {}，帧拒绝 {}，恢复 {}",
+        s.frames_pushed, s.errors, s.frames_skipped, s.frames_rejected, s.recoveries
     );
     if s.errors > 0 {
         println!(

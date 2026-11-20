@@ -2,6 +2,7 @@
 //!
 //! Display 结构体将 I2C 总线、SSD1309 控制器和帧缓冲区组合为统一接口。
 
+mod crc;
 mod framebuffer;
 mod i2c_bus;
 mod ssd1309;
@@ -231,6 +232,8 @@ pub struct DriverStats {
     pub recoveries: u64,
     /// 累计错误次数。
     pub errors: u64,
+    /// 推帧路径被接收端 NACK 拒绝的帧数（长度或 CRC 校验失败）。
+    pub frames_rejected: u64,
 }
 
 /// 驱动日志回调类型。
@@ -321,7 +324,7 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
         self.logger = Some(Box::new(logger));
     }
 
-    /// 获取驱动运行统计（帧数 / 错误数 / 恢复次数）。
+    /// 获取驱动运行统计（帧数 / 错误数 / 恢复次数 / 帧拒绝次数）。
     pub fn stats(&self) -> DriverStats {
         self.stats
     }
@@ -342,7 +345,11 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
             }
             Err(e) => {
                 self.stats.errors += 1;
-                Err(e.into())
+                let err = DriverError::from(e);
+                if err.is_frame_rejected() {
+                    self.stats.frames_rejected += 1;
+                }
+                Err(err)
             }
         }
     }
@@ -386,7 +393,11 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
             }
             Err(e) => {
                 self.stats.errors += 1;
-                Err(e.into())
+                let err = DriverError::from(e);
+                if err.is_frame_rejected() {
+                    self.stats.frames_rejected += 1;
+                }
+                Err(err)
             }
         }
     }
@@ -475,8 +486,10 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
 
     /// 推帧（带自动恢复，最佳努力语义）。
     ///
-    /// 首次推帧失败时复位 I2C 总线并重试一次；仍失败则跳过本帧
+    /// 首次推帧因总线错误失败时复位 I2C 总线并重试一次；仍失败则跳过本帧
     /// （记录日志、不返回错误），等待后续帧周期自行恢复。
+    /// 接收端 NACK（长度/CRC 校验失败）属于帧校验失败，不触发总线恢复，
+    /// 直接跳过本帧；底层 `I2cBus` 已按固定次数重试。
     /// 恢复失败后进入冷却期（见 [`RECOVER_COOLDOWN`]），冷却期内
     /// 不再尝试恢复、直接跳过本帧，避免永久故障时每帧触发
     /// recover（关/开 fd + 全量初始化）造成系统调用与日志风暴。
@@ -488,6 +501,12 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
             Ok(()) => RenderStatus::Ok,
             Err(e) => {
                 self.log(&format!("帧推送失败: {e}"));
+                // 接收端 NACK（长度/CRC 校验失败）不是总线故障：跳过本帧，
+                // 不重置总线。底层 I2cBus 已按固定次数重试，仍失败才到达这里。
+                if e.is_frame_rejected() {
+                    self.stats.frames_skipped += 1;
+                    return RenderStatus::Skipped;
+                }
                 if self.recover_in_cooldown() {
                     self.stats.frames_skipped += 1;
                     return RenderStatus::Skipped;
@@ -868,6 +887,72 @@ mod tests {
             Rc::new(Cell::new(0x01)),
         );
         (log, failures, bus)
+    }
+
+    thread_local! {
+        /// 控制测试总线是否拒绝写入（按测试线程隔离）。
+        static REJECT_WRITES: Cell<bool> = const { Cell::new(false) };
+        /// 拒绝写入计数，用于确认 Display 只统计一次拒绝。
+        static REJECT_WRITE_COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// 测试用总线：初始化阶段正常写入，可切换为 InvalidData 模拟接收端 NACK。
+    struct RejectingBus;
+
+    fn reject_writes() -> std::io::Result<()> {
+        if REJECT_WRITES.with(|v| v.get()) {
+            REJECT_WRITE_COUNT.with(|v| v.set(v.get() + 1));
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "mock: 接收端 CRC 拒绝",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    impl I2cDevice for RejectingBus {
+        fn write_command(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+            reject_writes()
+        }
+
+        fn write_data(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+            reject_writes()
+        }
+
+        fn read(&mut self) -> std::io::Result<u8> {
+            Ok(0x01)
+        }
+    }
+
+    impl I2cDeviceFactory for RejectingBus {
+        fn open(_bus_id: u8, _addr: u8) -> std::io::Result<Self> {
+            panic!("帧校验失败不应触发 recover");
+        }
+    }
+
+    #[test]
+    fn render_robust_skips_rejected_frame_without_recover() {
+        REJECT_WRITES.with(|v| v.set(false));
+        REJECT_WRITE_COUNT.with(|v| v.set(0));
+        let mut display =
+            Display::<RejectingBus>::from_device(RejectingBus, DisplayConfig::new(1, 0x3C))
+                .unwrap();
+        REJECT_WRITES.with(|v| v.set(true));
+        display.framebuffer.set_pixel(1, 1, true);
+        assert_eq!(display.render_robust(), RenderStatus::Skipped);
+        let s = display.stats();
+        assert_eq!(s.frames_pushed, 0);
+        assert_eq!(s.frames_skipped, 1);
+        assert_eq!(s.frames_rejected, 1);
+        assert_eq!(s.errors, 1);
+        assert_eq!(s.recoveries, 0);
+        // 总线层负责重试；Display 只记录一次拒绝
+        assert_eq!(REJECT_WRITE_COUNT.with(|v| v.get()), 1);
+        // 恢复正常后可继续推帧
+        REJECT_WRITES.with(|v| v.set(false));
+        assert_eq!(display.render_robust(), RenderStatus::Ok);
+        assert_eq!(display.stats().frames_pushed, 1);
     }
 
     #[test]

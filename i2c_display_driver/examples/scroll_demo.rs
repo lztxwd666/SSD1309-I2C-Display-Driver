@@ -60,8 +60,8 @@ fn main() -> Result<(), DriverError> {
         SCROLL_FRAMES, elapsed
     );
     println!(
-        "         推帧数: {}，错误: {}，跳过帧: {}，恢复次数: {}",
-        s.frames_pushed, s.errors, s.frames_skipped, s.recoveries
+        "         推帧数: {}，错误: {}，跳过帧: {}，帧拒绝: {}，恢复次数: {}",
+        s.frames_pushed, s.errors, s.frames_skipped, s.frames_rejected, s.recoveries
     );
     println!(
         "         平均帧率: {:.1} 帧/秒（= 滚动速度 {:.1} px/s）",
