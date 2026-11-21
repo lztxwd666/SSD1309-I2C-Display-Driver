@@ -45,7 +45,8 @@ impl std::error::Error for DriverError {
 
 impl From<io::Error> for DriverError {
     fn from(e: io::Error) -> Self {
-        // I2cBus 使用 InvalidData 表示接收端 NACK 或响应帧校验失败
+        // 约定：I2cDevice 实现用 InvalidData 表示帧校验失败
+        // （接收端 NACK 或响应帧 CRC/长度不符）
         if e.kind() == io::ErrorKind::InvalidData {
             Self::FrameRejected(e)
         } else {

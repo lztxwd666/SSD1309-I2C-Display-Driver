@@ -217,22 +217,24 @@ pub enum RenderStatus {
     Ok,
     /// 首帧失败，经 I2C 总线恢复后重试成功。
     Recovered,
-    /// 恢复后仍失败，本帧被跳过。
+    /// 本帧被跳过（总线恢复失败、帧拒绝或恢复冷却期）。
     Skipped,
 }
 
 /// 驱动运行统计。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DriverStats {
-    /// 成功推送的帧数。
+    /// 成功推送的显示帧数（一次 `render`/`render_region` 调用计一帧）。
     pub frames_pushed: u64,
-    /// 被跳过的帧数（恢复后仍失败）。
+    /// 被跳过的显示帧数（总线恢复失败、帧拒绝或恢复冷却期）。
     pub frames_skipped: u64,
     /// 成功执行的 I2C 总线恢复次数。
     pub recoveries: u64,
-    /// 累计错误次数。
+    /// 累计错误次数（推帧与状态读取失败）。
     pub errors: u64,
-    /// 推帧路径被接收端 NACK 拒绝的帧数（长度或 CRC 校验失败）。
+    /// 推帧路径被接收端 NACK 拒绝的显示帧数（长度或 CRC 校验失败）。
+    ///
+    /// 不是 I2C 事务数：一次 `render`/`render_region` 可能包含多次 I2C 写入。
     pub frames_rejected: u64,
 }
 
@@ -697,9 +699,21 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     /// 说明屏幕内部忙（控制器无响应），二者恢复策略不同。
     /// 解析辅助见 [`status_busy`](Self::status_busy) 与
     /// [`status_booster`](Self::status_booster)。
+    ///
+    /// 失败时计入 [`DriverStats::errors`]；帧校验失败不计入
+    /// [`DriverStats::frames_rejected`]（该字段只统计推帧路径）。
     pub fn read_status(&mut self) -> Result<u8, DriverError> {
-        let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
-        Ok(driver.read_status()?)
+        let result = {
+            let driver = self.driver.as_mut().ok_or(DriverError::NotInitialized)?;
+            driver.read_status()
+        };
+        match result {
+            Ok(status) => Ok(status),
+            Err(e) => {
+                self.stats.errors += 1;
+                Err(e.into())
+            }
+        }
     }
 
     /// 解析状态字节：忙标志（bit7）。
@@ -931,6 +945,32 @@ mod tests {
         }
     }
 
+    /// 测试用总线：初始化正常，状态读取返回帧校验失败。
+    struct ReadFailingBus;
+
+    impl I2cDevice for ReadFailingBus {
+        fn write_command(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn write_data(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn read(&mut self) -> std::io::Result<u8> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "mock: 状态帧 CRC 失败",
+            ))
+        }
+    }
+
+    impl I2cDeviceFactory for ReadFailingBus {
+        fn open(_bus_id: u8, _addr: u8) -> std::io::Result<Self> {
+            panic!("状态读取失败不应触发 recover");
+        }
+    }
+
     #[test]
     fn render_robust_skips_rejected_frame_without_recover() {
         REJECT_WRITES.with(|v| v.set(false));
@@ -953,6 +993,36 @@ mod tests {
         REJECT_WRITES.with(|v| v.set(false));
         assert_eq!(display.render_robust(), RenderStatus::Ok);
         assert_eq!(display.stats().frames_pushed, 1);
+    }
+
+    #[test]
+    fn render_region_rejected_counts_frame() {
+        REJECT_WRITES.with(|v| v.set(false));
+        REJECT_WRITE_COUNT.with(|v| v.set(0));
+        let mut display =
+            Display::<RejectingBus>::from_device(RejectingBus, DisplayConfig::new(1, 0x3C))
+                .unwrap();
+        REJECT_WRITES.with(|v| v.set(true));
+        display.framebuffer.set_pixel(0, 0, true);
+        let err = display.render_region(0, 0, 8, 8).unwrap_err();
+        assert!(err.is_frame_rejected());
+        let stats = display.stats();
+        assert_eq!(stats.errors, 1);
+        assert_eq!(stats.frames_rejected, 1);
+        assert_eq!(stats.frames_pushed, 0);
+        assert_eq!(stats.recoveries, 0);
+    }
+
+    #[test]
+    fn read_status_error_counts_in_errors_only() {
+        let mut display =
+            Display::<ReadFailingBus>::from_device(ReadFailingBus, DisplayConfig::new(1, 0x3C))
+                .unwrap();
+        let err = display.read_status().unwrap_err();
+        assert!(err.is_frame_rejected());
+        let stats = display.stats();
+        assert_eq!(stats.errors, 1);
+        assert_eq!(stats.frames_rejected, 0);
     }
 
     #[test]

@@ -9,9 +9,13 @@
 //! - 状态读响应：状态字节 + CRC（3 字节）
 //!
 //! CRC 覆盖控制字节、长度字节与载荷，低字节在前。接收端根据长度字节确定
-//! 帧尾，在最后一个字节（CRC_H）的 ACK 周期校验长度与 CRC，失败时 NACK；
-//! Linux i2c-dev 将数据 NACK 映射为 `EREMOTEIO`，本层据此重试并上报。
+//! 帧尾，在最后一个字节（CRC_H）的 ACK 周期校验长度与 CRC，失败时必须 NACK；
+//! Linux i2c-dev 通常将 NACK 映射为 `EREMOTEIO`，本层据此重试并上报。
 //! 帧格式见项目 `docs/i2c-crc-protocol.md`。
+//!
+//! 错误约定：帧校验失败（接收端 NACK 或状态帧 CRC/长度不符）统一使用
+//! `io::ErrorKind::InvalidData`；`Display` 据此映射为 `DriverError::FrameRejected`。
+//! 自定义 [`I2cDevice`] 实现需遵循同一约定，其他 I/O 错误使用其他 `ErrorKind`。
 //!
 //! [`I2cDevice`] trait 抽象了驱动对 I2C 的全部需求（命令/数据两通道写入），
 //! 便于测试注入 Mock 总线或接入其他后端。
@@ -38,6 +42,11 @@ const FRAME_RETRIES: usize = 2;
 /// 实现者需提供命令（控制字节 0x00）与数据（控制字节 0x40）两通道写入，
 /// 以及一个字节的状态读取。CRC 帧封装属于传输实现职责：
 /// [`I2cBus`] 已按 `docs/i2c-crc-protocol.md` 实现，自定义实现需遵循同一协议。
+///
+/// 错误约定：帧校验失败（接收端 NACK 或响应帧 CRC/长度不符）返回
+/// [`io::ErrorKind::InvalidData`]，[`Display`](crate::display::Display) 会映射为
+/// [`DriverError::FrameRejected`](crate::DriverError::FrameRejected)；
+/// 其他 I/O 错误使用其他 `ErrorKind`。
 pub trait I2cDevice {
     /// 发送命令（0x00 控制字节前缀）。
     fn write_command(&mut self, bytes: &[u8]) -> io::Result<()>;
@@ -60,7 +69,11 @@ pub struct I2cBus {
     file: fs::File,
 }
 
-/// Linux i2c-dev 在从机对数据字节返回 NACK 时使用的 errno。
+/// 判断 I/O 错误是否按“接收端拒绝本帧”处理。
+///
+/// 当前策略把 `EREMOTEIO` 一律视为帧拒绝。注意 Linux DesignWare（RP1）
+/// 对地址 NACK 与 SDA stuck 也可能返回该 errno，此时同样按帧拒绝跳过、
+/// 不触发 `recover()`；这是本库的既定行为。
 fn is_data_nack(err: &io::Error) -> bool {
     err.raw_os_error() == Some(libc::EREMOTEIO)
 }
@@ -80,9 +93,9 @@ fn build_frame(control: u8, payload: &[u8], out: &mut [u8; FRAME_MAX]) -> usize 
 
 /// 发送一帧；接收端 NACK 时重试，其他 I/O 错误直接返回。
 ///
-/// 重试仅针对接收端数据 NACK（长度或 CRC 校验失败）。总线错误（EIO、ENXIO 等）
-/// 不重试：RP1 控制器在 sleep 后重新同步，反复 write 会制造额外故障链；
-/// 这类错误由上层 `recover()` 处理。
+/// 重试仅针对 `EREMOTEIO`（按当前策略视为接收端拒绝本帧）；EIO、ENXIO 等
+/// 其他 I/O 错误不重试，由上层 `recover()` 处理。RP1/DesignWare 的地址 NACK、
+/// SDA stuck 也可能返回 `EREMOTEIO`，此时同样按帧拒绝处理。
 fn write_frame_with_retries<W: Write>(writer: &mut W, frame: &[u8]) -> io::Result<()> {
     let mut attempt = 0;
     loop {
@@ -119,6 +132,24 @@ fn decode_status_frame(frame: &[u8; STATUS_FRAME_LEN]) -> io::Result<u8> {
     Ok(frame[0])
 }
 
+/// 重试整次状态读取：响应帧校验失败（`InvalidData`）时重新发请求并读取，
+/// 最多重试 [`FRAME_RETRIES`] 次；其他 I/O 错误直接返回。
+fn retry_status_read<F>(mut read_once: F) -> io::Result<u8>
+where
+    F: FnMut() -> io::Result<u8>,
+{
+    let mut attempt = 0;
+    loop {
+        match read_once() {
+            Ok(status) => return Ok(status),
+            Err(e) if e.kind() == io::ErrorKind::InvalidData && attempt < FRAME_RETRIES => {
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 impl I2cBus {
     /// 打开 /dev/i2c-{bus} 并绑定从机地址。
     pub fn open(bus: u8, addr: u8) -> io::Result<Self> {
@@ -139,11 +170,40 @@ impl I2cBus {
         let mut writer = &self.file;
         write_frame_with_retries(&mut writer, &buf[..len])
     }
+
+    /// 发送状态读请求帧（`00 00 01 B0`），带 NACK 重试。
+    fn send_status_request(&mut self) -> io::Result<()> {
+        let mut request = [0u8; FRAME_MAX];
+        let len = build_frame(0x00, &[], &mut request);
+        let mut writer = &self.file;
+        write_frame_with_retries(&mut writer, &request[..len])
+    }
+
+    /// 读取并校验 3 字节状态响应帧。
+    ///
+    /// 长度或 CRC 不符返回 `InvalidData`，供 [`retry_status_read`] 判定是否重试。
+    fn read_status_response(&mut self) -> io::Result<u8> {
+        let mut frame = [0u8; STATUS_FRAME_LEN];
+        let n = self.file.read(&mut frame)?;
+        if n != STATUS_FRAME_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("I2C 状态帧长度错误: 期望 {STATUS_FRAME_LEN} 字节，实际 {n} 字节"),
+            ));
+        }
+        decode_status_frame(&frame)
+    }
 }
 
 impl I2cDevice for I2cBus {
     /// 发送 I2C 命令（控制字节 0x00，末尾 Modbus CRC16）。
     fn write_command(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "I2C 命令载荷不能为空：空命令帧与状态读请求（len=0）冲突",
+            ));
+        }
         if bytes.len() > MAX_PAYLOAD {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -155,6 +215,12 @@ impl I2cDevice for I2cBus {
 
     /// 发送 GDDRAM 数据（控制字节 0x40，末尾 Modbus CRC16）。
     fn write_data(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "I2C 数据载荷不能为空",
+            ));
+        }
         if bytes.len() > MAX_PAYLOAD {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -166,28 +232,18 @@ impl I2cDevice for I2cBus {
 
     /// 读取一个字节（SSD1309 状态寄存器）。
     ///
-    /// 先发送状态读请求帧（`0x00 0x00` + CRC，线上 `00 00 01 B0`），再单次
-    /// 读取 3 字节响应 `状态字节 + CRC_L + CRC_H`；长度或 CRC 不符时返回
-    /// `InvalidData`（上层映射为帧校验失败）。
+    /// 先发送状态读请求帧（`0x00 0x00` + CRC，线上 `00 00 01 B0`），再读取
+    /// 3 字节响应 `状态字节 + CRC_L + CRC_H`。响应长度或 CRC 不符时重试整次
+    /// 读取，最多重试 `FRAME_RETRIES` 次；其他 I/O 错误直接返回。
     ///
     /// SSD1306/1309 的 I2C 读序列要求先发送控制字节 0x00（命令模式）
     /// 选择状态寄存器，再进行读操作；两次独立事务在从机侧等效于
     /// 重复起始（实测可用）。
     fn read(&mut self) -> io::Result<u8> {
-        let mut request = [0u8; FRAME_MAX];
-        let request_len = build_frame(0x00, &[], &mut request);
-        let mut writer = &self.file;
-        write_frame_with_retries(&mut writer, &request[..request_len])?;
-
-        let mut frame = [0u8; STATUS_FRAME_LEN];
-        let n = self.file.read(&mut frame)?;
-        if n != STATUS_FRAME_LEN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("I2C 状态帧长度错误: 期望 {STATUS_FRAME_LEN} 字节，实际 {n} 字节"),
-            ));
-        }
-        decode_status_frame(&frame)
+        retry_status_read(|| {
+            self.send_status_request()?;
+            self.read_status_response()
+        })
     }
 }
 
@@ -365,5 +421,105 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(writer.writes, FRAME_RETRIES + 1);
         assert!(writer.bytes.is_empty());
+    }
+
+    #[test]
+    fn write_frame_stops_on_non_nack_after_nack() {
+        struct MixedWriter {
+            calls: usize,
+        }
+
+        impl Write for MixedWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                self.calls += 1;
+                if self.calls == 1 {
+                    Err(io::Error::from_raw_os_error(libc::EREMOTEIO))
+                } else {
+                    Err(io::Error::from_raw_os_error(libc::EIO))
+                }
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = MixedWriter { calls: 0 };
+        let err = write_frame_with_retries(&mut writer, &[0x00, 0x01, 0xAE]).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EIO));
+        assert_eq!(writer.calls, 2);
+    }
+
+    #[test]
+    fn empty_command_is_rejected_without_writing() {
+        let (mut bus, path) = temp_bus("empty_command");
+        let err = bus.write_command(&[]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        drop(bus);
+        assert!(read_bytes(&path).is_empty());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_data_is_rejected_without_writing() {
+        let (mut bus, path) = temp_bus("empty_data");
+        let err = bus.write_data(&[]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        drop(bus);
+        assert!(read_bytes(&path).is_empty());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn max_payload_frame_is_259_bytes_with_valid_crc() {
+        let (mut bus, path) = temp_bus("max_payload");
+        bus.write_command(&[0x5A; MAX_PAYLOAD]).unwrap();
+        drop(bus);
+        let bytes = read_bytes(&path);
+        assert_eq!(bytes.len(), FRAME_MAX);
+        assert_eq!(bytes[0], 0x00);
+        assert_eq!(bytes[1], MAX_PAYLOAD as u8);
+        assert!(crate::display::crc::verify_crc(&bytes));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn retry_status_read_retries_invalid_data_then_succeeds() {
+        let mut calls = 0;
+        let status = retry_status_read(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(io::Error::new(io::ErrorKind::InvalidData, "bad frame"))
+            } else {
+                Ok(0x01)
+            }
+        })
+        .unwrap();
+        assert_eq!(status, 0x01);
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn retry_status_read_gives_up_after_retries() {
+        let mut calls = 0;
+        let err = retry_status_read(|| {
+            calls += 1;
+            Err::<u8, _>(io::Error::new(io::ErrorKind::InvalidData, "bad frame"))
+        })
+        .unwrap_err();
+        assert_eq!(calls, FRAME_RETRIES + 1);
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn retry_status_read_does_not_retry_bus_errors() {
+        let mut calls = 0;
+        let err = retry_status_read(|| {
+            calls += 1;
+            Err::<u8, _>(io::Error::from_raw_os_error(libc::EIO))
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(err.raw_os_error(), Some(libc::EIO));
     }
 }
