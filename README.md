@@ -179,9 +179,9 @@ println!("推帧 {} 次，跳过 {} 帧，恢复 {} 次，拒绝 {} 帧，错误
 
 CRC 参数与 Modbus RTU 一致：多项式 0x8005（反射值 0xA001）、初值 0xFFFF、输入/输出反射、最终不取反；标准检查值 `"123456789"` = 0x4B37。例如命令 `0xAE` 的线上帧为 `00 01 AE F1 EC`，状态读请求为 `00 00 01 B0`。
 
-接收端根据长度字节确定帧尾，在最后一个字节（`CRC_H`）的 ACK 周期校验长度与 CRC；失败时 NACK。Linux i2c-dev 将数据 NACK 映射为 `EREMOTEIO`，`I2cBus` 对 NACK 最多重试 2 次，仍失败返回 `DriverError::FrameRejected`（Python 为 `FrameRejectedError`）；调用方可用 `err.is_frame_rejected()`（Rust）或捕获 `FrameRejectedError`（Python）区分帧校验失败与其他 I/O 错误。`render_robust()` 只跳过该帧并计入 `frames_rejected`，不重置 I2C 总线。
+接收端根据长度字节确定帧尾，在最后一个字节（`CRC_H`）的 ACK 周期校验长度与 CRC；失败时必须 NACK。Linux i2c-dev 通常将 NACK 映射为 `EREMOTEIO`，`I2cBus` 对 `EREMOTEIO` 最多重试 2 次，仍失败返回 `io::ErrorKind::InvalidData`；`Display` 层将其映射为 `DriverError::FrameRejected`（Python 为 `FrameRejectedError`），调用方可用 `err.is_frame_rejected()`（Rust）或捕获 `FrameRejectedError`（Python）区分。`render_robust()` 只跳过该帧并计入 `frames_rejected`，不重置 I2C 总线。注意：RP1/DesignWare 对地址 NACK、SDA stuck 也可能返回 `EREMOTEIO`，当前策略会把这些情况同样按帧拒绝跳过、不触发 `recover()`。
 
-该格式为协议 v2；此前的 v1（无长度字段、状态读请求 3 字节）不兼容，驱动与对端必须同时升级。原生 SSD1309 面板不识别长度字节与校验字节，必须由 I2C 对端按同一协议解析、校验并剥离后再转发给面板。完整帧定义、接收端处理流程、C/Python 参考实现与一致性测试向量见 [docs/i2c-crc-protocol.md](docs/i2c-crc-protocol.md)；给对端开发者的精简适配版见 [docs/i2c-crc-quickstart.md](docs/i2c-crc-quickstart.md)。
+该格式为协议 v2；此前的 v1（无长度字段、状态读请求/响应各 1 字节）不兼容，驱动与对端必须同时升级。原生 SSD1309 面板不识别长度字节与校验字节，必须由 I2C 对端按同一协议解析、校验并剥离后再转发给面板。完整帧定义、接收端处理流程、C/Python 参考实现与一致性测试向量见 [docs/i2c-crc-protocol.md](docs/i2c-crc-protocol.md)；给对端开发者的精简适配版见 [docs/i2c-crc-quickstart.md](docs/i2c-crc-quickstart.md)。
 
 ## 示例
 

@@ -55,7 +55,7 @@ cargo test -- --ignored            # 长稳自动化测试（MockBus 故障注�
 - **I2C 总线 100kHz**（总线上挂载其他设备，勿改为 400kHz）：全帧推 1024 字节 ≈ 100ms，软件滚动帧率上限约 8-10 帧/秒——这是预期值，不是 bug。
 - **页寻址模式**（`0x20 0x02`）是刻意选择，规避 Pi 5 RP1 I2C 控制器的大块传输限制。
 - `render_region` 只清除被本次推送完全覆盖的脏矩形，未覆盖部分保留（避免局部推帧丢失更新）。
-- **I2C 帧 v2（长度字段 + 末字节 NACK）**：写帧为控制字节 + `len` + 载荷 + Modbus CRC16（低字节在前）；接收端在 `CRC_H` 的 ACK 周期校验失败时 NACK。`I2cBus` 对数据 NACK（Linux `EREMOTEIO`）重试 2 次，仍失败报 `DriverError::FrameRejected`；`render_robust` 跳过该帧、不触发 `recover`。状态读请求 4 字节，状态读响应 3 字节。原生 SSD1309 不识别长度/校验字节，必须由对端剥离；帧格式变更需两端同步。规范见 `docs/i2c-crc-protocol.md`。
+- **I2C 帧 v2（长度字段 + 末字节 NACK）**：写帧为控制字节 + `len` + 载荷 + Modbus CRC16（低字节在前）；接收端在 `CRC_H` 的 ACK 周期校验失败时必须 NACK。`I2cBus` 对 `EREMOTEIO` 重试 2 次，仍失败返回 `io::ErrorKind::InvalidData`（`Display` 映射为 `DriverError::FrameRejected`）；`render_robust` 跳过该显示帧、不触发 `recover`。RP1/DesignWare 的地址 NACK/SDA stuck 也可能返回 `EREMOTEIO`，当前策略同样按帧拒绝处理，这是既定行为。状态读请求 4 字节，状态读响应 3 字节，响应校验失败会重试整次读取；`read_status` 失败计入 `errors`，不计入 `frames_rejected`。原生 SSD1309 不识别长度/校验字节，必须由对端剥离；帧格式变更需两端同步。规范见 `docs/i2c-crc-protocol.md`。
 
 ## 关键约定
 
