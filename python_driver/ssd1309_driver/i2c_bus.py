@@ -8,8 +8,8 @@
 - 状态读响应：状态字节 + CRC（3 字节）
 
 CRC 覆盖控制字节、长度字节与载荷，低字节在前。接收端根据长度字段确定
-帧尾，在最后一个字节（CRC_H）的 ACK 周期校验长度与 CRC，失败时 NACK；
-Linux i2c-dev 将数据 NACK 映射为 EREMOTEIO，本层据此重试并上报。
+帧尾，在最后一个字节（CRC_H）的 ACK 周期校验长度与 CRC，失败时必须 NACK；
+Linux i2c-dev 通常将 NACK 映射为 EREMOTEIO，本层据此重试并上报。
 帧格式见项目 docs/i2c-crc-protocol.md。
 """
 
@@ -27,7 +27,7 @@ I2C_SLAVE = 0x0703
 MAX_PAYLOAD = 255
 # 接收端 NACK 后的重试次数（不含首次发送）
 FRAME_RETRIES = 2
-# Linux 数据 NACK 的 errno；非 Linux 平台回退到 121
+# 按帧拒绝处理的 errno（Linux EREMOTEIO）；非 Linux 平台回退到 121
 EREMOTEIO = getattr(errno, "EREMOTEIO", 121)
 
 
@@ -75,7 +75,11 @@ class I2cBus:
 
     @staticmethod
     def _is_data_nack(exc: I2cError) -> bool:
-        """判断异常是否由接收端数据 NACK（长度或 CRC 拒绝）引起。"""
+        """判断异常是否按接收端拒绝本帧处理。
+
+        当前策略把 EREMOTEIO 一律视为帧拒绝；RP1/DesignWare 的地址 NACK、
+        SDA stuck 也可能返回该 errno，此时同样按帧拒绝处理。
+        """
         cause = exc.cause
         return isinstance(cause, OSError) and cause.errno == EREMOTEIO
 
@@ -118,9 +122,21 @@ class I2cBus:
 
         先发送状态读请求帧（0x00 0x00 + CRC，线上 00 00 01 B0），再读取
         3 字节响应（状态字节 + CRC_L + CRC_H），校验通过后返回状态字节。
+        响应长度或 CRC 不符时重试整次读取，最多重试 FRAME_RETRIES 次；
+        其他 I/O 错误直接返回。
         """
         if self._fd is None:
             raise I2cError("I2C 总线未打开")
+        for attempt in range(FRAME_RETRIES + 1):
+            try:
+                return self._read_status_once()
+            except FrameRejectedError:
+                if attempt >= FRAME_RETRIES:
+                    raise
+        raise AssertionError("状态读取重试循环不可达")
+
+    def _read_status_once(self) -> int:
+        """发送一次状态读请求并校验 3 字节响应，供重试循环使用。"""
         self._write_frame(0x00, b"")
         try:
             buf = os.read(self._fd, 3)

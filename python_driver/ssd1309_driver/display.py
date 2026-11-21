@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
 
-from .errors import DriverError, FrameRejectedError, NotInitializedError
+from .errors import DriverError, FrameRejectedError, I2cError, NotInitializedError
 from .framebuffer import Framebuffer, PageBuffer, WIDTH, HEIGHT
 from .i2c_bus import I2cBus
 from .ssd1309 import DisplayRotation, ScrollDirection, VerticalDirection, Ssd1309
@@ -172,6 +172,9 @@ class Display:
             self.stats.errors += 1
             self.stats.frames_rejected += 1
             raise
+        except I2cError:
+            self.stats.errors += 1
+            raise
         except Exception as e:
             self.stats.errors += 1
             raise DriverError(str(e), e) from e
@@ -192,6 +195,9 @@ class Display:
         except FrameRejectedError:
             self.stats.errors += 1
             self.stats.frames_rejected += 1
+            raise
+        except I2cError:
+            self.stats.errors += 1
             raise
         except Exception as e:
             self.stats.errors += 1
@@ -264,7 +270,13 @@ class Display:
         self.config.display_on = True
 
     def read_status(self) -> int:
-        return self._require_driver().read_status()
+        """读取状态寄存器；失败时计入 errors，不计入 frames_rejected。"""
+        driver = self._require_driver()
+        try:
+            return driver.read_status()
+        except DriverError:
+            self.stats.errors += 1
+            raise
 
     def set_rotation(self, rotation: DisplayRotation) -> None:
         self._require_driver().set_rotation(rotation)
@@ -372,6 +384,9 @@ class Display:
             self._driver = driver
             self._last_recover_failed = None
             self._log("I2C 总线重置成功")
+        except DriverError:
+            self._last_recover_failed = time.monotonic()
+            raise
         except Exception as e:
             self._last_recover_failed = time.monotonic()
             raise DriverError(str(e)) from e

@@ -5,16 +5,27 @@ import unittest
 from unittest import mock
 
 from ssd1309_driver.errors import FrameRejectedError, I2cError, InvalidDataError
-from ssd1309_driver.i2c_bus import I2cBus
+from ssd1309_driver.i2c_bus import FRAME_RETRIES, I2cBus
 
 
 class I2cBusFramingTest(unittest.TestCase):
-    def _open_bus(self, response: bytes = b"\x01\x7e\x80", write_behavior=None):
+    def _open_bus(
+        self,
+        response: bytes = b"\x01\x7e\x80",
+        write_behavior=None,
+        read_side_effect=None,
+    ):
         writes = []
 
         def fake_write(_fd, data):
             writes.append(bytes(data))
             return len(data)
+
+        if read_side_effect is None:
+
+            def read_side_effect(_fd, size):
+                self.assertEqual(size, 3, "v2 状态读固定读取 3 字节")
+                return response
 
         patchers = [
             mock.patch("ssd1309_driver.i2c_bus.os.open", return_value=99),
@@ -25,7 +36,9 @@ class I2cBusFramingTest(unittest.TestCase):
                     write_behavior if write_behavior is not None else fake_write
                 ),
             ),
-            mock.patch("ssd1309_driver.i2c_bus.os.read", return_value=response),
+            mock.patch(
+                "ssd1309_driver.i2c_bus.os.read", side_effect=read_side_effect
+            ),
             mock.patch("ssd1309_driver.i2c_bus.os.close"),
         ]
         for patcher in patchers:
@@ -53,7 +66,32 @@ class I2cBusFramingTest(unittest.TestCase):
         bus, writes = self._open_bus(response=bytes.fromhex("01 00 00"))
         with self.assertRaises(FrameRejectedError):
             bus.read_byte()
-        self.assertEqual(writes, [bytes.fromhex("00 00 01 B0")])
+        self.assertEqual(writes, [bytes.fromhex("00 00 01 B0")] * (FRAME_RETRIES + 1))
+
+    def test_read_byte_retries_corrupted_response(self):
+        responses = iter([bytes.fromhex("01 00 00"), bytes.fromhex("01 7E 80")])
+
+        def fake_read(_fd, size):
+            self.assertEqual(size, 3)
+            return next(responses)
+
+        bus, writes = self._open_bus(read_side_effect=fake_read)
+        self.assertEqual(bus.read_byte(), 0x01)
+        self.assertEqual(writes, [bytes.fromhex("00 00 01 B0")] * 2)
+
+    def test_read_byte_gives_up_after_retries(self):
+        calls = {"n": 0}
+
+        def fake_read(_fd, size):
+            self.assertEqual(size, 3)
+            calls["n"] += 1
+            return bytes.fromhex("01 00 00")
+
+        bus, writes = self._open_bus(read_side_effect=fake_read)
+        with self.assertRaises(FrameRejectedError):
+            bus.read_byte()
+        self.assertEqual(calls["n"], FRAME_RETRIES + 1)
+        self.assertEqual(writes, [bytes.fromhex("00 00 01 B0")] * (FRAME_RETRIES + 1))
 
     def test_read_byte_rejects_short_response(self):
         bus, _writes = self._open_bus(response=b"\x01")
