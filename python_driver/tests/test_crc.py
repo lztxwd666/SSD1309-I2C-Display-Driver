@@ -1,4 +1,4 @@
-"""Modbus CRC16 与协议 v2 帧格式测试，无需硬件"""
+"""Modbus CRC16 和 v3 写帧、回执的一致性测试。"""
 
 import unittest
 
@@ -17,19 +17,18 @@ class ModbusCrc16Test(unittest.TestCase):
 
     def test_append_writes_low_byte_first(self):
         self.assertEqual(
-            append_crc(bytes.fromhex("00 01 AE")),
-            bytes.fromhex("00 01 AE F1 EC"),
+            append_crc(bytes.fromhex("00 01 01 00 AE")),
+            bytes.fromhex("00 01 01 00 AE F5 80"),
         )
 
     def test_frame_vectors(self):
         vectors = {
-            "00 01 AE": "00 01 AE F1 EC",
-            "00 02 81 CF": "00 02 81 CF 81 E0",
-            "00 02 20 02": "00 02 20 02 39 E5",
-            "00 01 B0": "00 01 B0 71 E4",
-            "00 02 00 10": "00 02 00 10 A0 28",
-            "40 02 01 02": "40 02 01 02 34 75",
-            "00 00": "00 00 01 B0",
+            "7F 00 00 00": "7F 00 00 00 19 F0",
+            "00 01 01 00 AE": "00 01 01 00 AE F5 80",
+            "40 02 02 00 01 02": "40 02 02 00 01 02 F6 F2",
+            "01 00 03 00": "01 00 03 00 01 28",
+            "01 00 00 00": "01 00 00 00 01 D8",
+            "83 03 00 81": "83 03 00 81 19 C0",
         }
         for plain, framed in vectors.items():
             with self.subTest(plain=plain):
@@ -39,13 +38,13 @@ class ModbusCrc16Test(unittest.TestCase):
 
     def test_strip_and_verify_roundtrip(self):
         self.assertEqual(
-            strip_and_verify(bytes.fromhex("40 02 01 02 34 75")),
-            bytes.fromhex("40 02 01 02"),
+            strip_and_verify(bytes.fromhex("83 03 00 81 19 C0")),
+            bytes.fromhex("83 03 00 81"),
         )
 
     def test_strip_rejects_corrupted_frame(self):
         with self.assertRaises(ValueError):
-            strip_and_verify(bytes.fromhex("00 01 AE F1 ED"))
+            strip_and_verify(bytes.fromhex("83 03 00 81 19 C1"))
 
     def test_strip_rejects_short_frame(self):
         with self.assertRaises(ValueError):

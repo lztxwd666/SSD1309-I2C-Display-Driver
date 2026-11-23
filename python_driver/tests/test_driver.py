@@ -1,8 +1,13 @@
 """基础单元测试，使用 MockBus，无需硬件"""
 
+import io
+import runpy
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest.mock import call, patch
 
-from ssd1309_driver import Display, DisplayConfig, Framebuffer
+from ssd1309_driver import Display, DisplayConfig, Framebuffer, I2cError
 from ssd1309_driver.graphics import draw_text
 from ssd1309_driver.ssd1309 import Ssd1309
 
@@ -53,6 +58,31 @@ class DisplayTest(unittest.TestCase):
         draw_text(display.framebuffer, 0, 0, "OK")
         display.render()
         self.assertGreater(display.stats.frames_pushed, 0)
+
+
+class UsageExampleTest(unittest.TestCase):
+    path = Path(__file__).resolve().parents[1] / "examples" / "usage.py"
+
+    def test_usage_opens_once_before_recover(self):
+        initial_bus = MockBus()
+        recovered_bus = MockBus()
+        with patch("ssd1309_driver.display.I2cBus") as factory, patch(
+            "time.sleep"
+        ), patch.object(initial_bus, "close") as close, redirect_stdout(
+            io.StringIO()
+        ) as output:
+            factory.return_value.open.side_effect = [initial_bus, recovered_bus]
+            runpy.run_path(str(self.path), run_name="__main__")
+
+        self.assertEqual(factory.call_args_list, [call(1, 0x3C)] * 2)
+        close.assert_called_once_with()
+        self.assertIn("done", output.getvalue())
+
+    def test_usage_reports_i2c_failure_as_unsuccessful_exit(self):
+        with patch("ssd1309_driver.display.I2cBus") as factory:
+            factory.return_value.open.side_effect = I2cError("同步失败")
+            with self.assertRaisesRegex(SystemExit, "驱动错误: 同步失败"):
+                runpy.run_path(str(self.path), run_name="__main__")
 
 
 if __name__ == "__main__":
