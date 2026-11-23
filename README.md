@@ -15,10 +15,10 @@
 - **高级寄存器调节**：显示偏移、起始行、多路复用比、时钟、预充电、VCOMH、COM 引脚、电荷泵
 - **硬件滚动命令封装**：保留 SSD1309 硬件滚动命令入口，默认仍使用软件滚动
 - **多页显示**：`PageBuffer` 多页管理，瞬时/滚动动画两种翻页形式
-- **可靠显示**：`render_robust()` 自动恢复 I2C 总线（失败后冷却退避），恢复后沿用对比度/反色/显示开关等设置；逐页推帧规避 Pi 5 RP1 大块传输限制
-- **I2C 帧校验与 NACK 反馈**：所有写帧带 1 字节长度字段与 Modbus CRC16（低字节在前）；接收端在末字节 NACK 时发送端自动重试 2 次并上报 `FrameRejected`；对端要求见 [接收端协议规范](docs/i2c-crc-protocol.md)
+- **可靠显示**：`render_robust()` 自动重建 I2C 会话（失败后冷却退避），重建后沿用对比度/反色/显示开关等设置；逐页推帧规避 Pi 5 RP1 大块传输限制
+- **I2C 帧校验（v3）**：写帧有序号和 Modbus CRC16，接收端在 STOP 后校验，主机独立读取回执确认。见 [v3 协议规范](docs/i2c-crc-protocol.md)
 - **状态读取**：`read_status()` 读取 SSD1309 状态寄存器（忙/电荷泵），辅助故障诊断
-- **可观测性**：运行统计（推帧数/错误数/恢复次数/帧拒绝数）、日志回调
+- **可观测性**：运行统计（推帧数/错误数/恢复次数/帧拒绝数，后者仅自定义传输）、日志回调
 - **无硬件测试**：记录型 `MockBus` 验证命令序列，测试全部离线运行（含长稳故障注入测试）
 
 ## 快速开始
@@ -76,7 +76,7 @@ display.software_scroll_horizontal(ScrollDirection::Left, 1)?; // 循环左移 1
 display.software_scroll_vertical(VerticalDirection::Up, 1)?;    // 内容循环上移 1 行
 ```
 
-滚动为循环语义（移出屏幕的内容从另一侧进入）。注意：I2C 总线 100kHz 下每帧全推约 100ms，滚动帧率上限约 8-10 帧/秒，属预期表现。
+滚动为循环语义，移出屏幕的内容从另一侧进入。100 kHz 下 v3 全屏推送的上游纯线上时间约 125 ms，实际帧率取决于回执与下游处理时间。
 
 ### 旋转与初始化 Builder
 
@@ -166,22 +166,15 @@ println!("推帧 {} 次，跳过 {} 帧，恢复 {} 次，拒绝 {} 帧，错误
     s.frames_pushed, s.frames_skipped, s.recoveries, s.frames_rejected, s.errors);
 ```
 
-### I2C 帧校验（Modbus CRC16）
+### I2C 帧校验（协议 v3）
 
-所有经 `I2cBus` 发出的写帧格式为“控制字节 + 1 字节载荷长度 + 载荷 + 2 字节 Modbus CRC16”（低字节在前），CRC 覆盖控制字节、长度字节与载荷：
+Rust 与 Python 驱动打开设备时先发送 `SYNC`，随后每次只发送一笔待确认的写帧。写帧包含 `type + len + 16 位序号 + 载荷 + CRC16`。接收端在 STOP 后校验并处理，再通过独立读事务返回固定 6 字节回执。主机校验回执 CRC，并核对最近成功序号。回执可重读，重发使用原序号和原字节。
 
-| 帧类型     | 线上字节                                         | CRC 覆盖                     |
-| ---------- | ------------------------------------------------ | ---------------------------- |
-| 命令帧     | `0x00` + `len` + 命令载荷 + `CRC_L` + `CRC_H`    | `0x00` + `len` + 命令载荷    |
-| 数据帧     | `0x40` + `len` + GDDRAM 数据 + `CRC_L` + `CRC_H` | `0x40` + `len` + GDDRAM 数据 |
-| 状态读请求 | `0x00` + `0x00` + `CRC_L` + `CRC_H`              | `0x00` + `0x00`              |
-| 状态读响应 | 状态字节 + `CRC_L` + `CRC_H`（主机读 3 字节）    | 状态字节                     |
+`read_status()` 仍返回 SSD1309 的一个状态字节，驱动从类型 `0x01` 查询的匹配回执中取值。结果未知或会话失效时，`render_robust()` 通过重新打开连接、同步会话并初始化面板来恢复，再推送完整画面。普通接口会将错误交给调用方，调用方可使用 `recover()` 恢复。
 
-CRC 参数与 Modbus RTU 一致：多项式 0x8005（反射值 0xA001）、初值 0xFFFF、输入/输出反射、最终不取反；标准检查值 `"123456789"` = 0x4B37。例如命令 `0xAE` 的线上帧为 `00 01 AE F1 EC`，状态读请求为 `00 00 01 B0`。
+Linux 端以 `I2C_TIMEOUT` 将适配器超时设为 100 ms；该设置是适配器级的，由同一适配器上的设备共享，关闭连接不会恢复原值。单帧确认总时限为 500 ms，到期停止启动新的读写事务。
 
-接收端根据长度字节确定帧尾，在最后一个字节（`CRC_H`）的 ACK 周期校验长度与 CRC；失败时必须 NACK。Linux i2c-dev 通常将 NACK 映射为 `EREMOTEIO`，`I2cBus` 对 `EREMOTEIO` 最多重试 2 次，仍失败返回 `io::ErrorKind::InvalidData`；`Display` 层将其映射为 `DriverError::FrameRejected`（Python 为 `FrameRejectedError`），调用方可用 `err.is_frame_rejected()`（Rust）或捕获 `FrameRejectedError`（Python）区分。`render_robust()` 只跳过该帧并计入 `frames_rejected`，不重置 I2C 总线。注意：RP1/DesignWare 对地址 NACK、SDA stuck 也可能返回 `EREMOTEIO`，当前策略会把这些情况同样按帧拒绝跳过、不触发 `recover()`。
-
-该格式为协议 v2；此前的 v1（无长度字段、状态读请求/响应各 1 字节）不兼容，驱动与对端必须同时升级。原生 SSD1309 面板不识别长度字节与校验字节，必须由 I2C 对端按同一协议解析、校验并剥离后再转发给面板。完整帧定义、接收端处理流程、C/Python 参考实现与一致性测试向量见 [docs/i2c-crc-protocol.md](docs/i2c-crc-protocol.md)；给对端开发者的精简适配版见 [docs/i2c-crc-quickstart.md](docs/i2c-crc-quickstart.md)。
+原生 SSD1309 需要配套 v3 接收端或桥接器。v3 的线协议与 v2 不兼容。详见 [v3 协议规范](docs/i2c-crc-protocol.md)和[接收端速查](docs/i2c-crc-quickstart.md)。已部署的 v2 设备可继续参考 [v2 规范](docs/i2c-crc-protocol-v2.md)和 [v2 接收端速查](docs/i2c-crc-quickstart-v2.md)。
 
 ## 示例
 
@@ -222,7 +215,7 @@ src/
 
 分层设计：`I2cDevice` trait 抽象底层总线（真机 `I2cBus`，测试注入 `MockBus`），`Display<B>` 泛型于设备类型——测试无需硬件即可验证完整命令序列。
 
-I2C 帧格式与对端实现要求见 [docs/i2c-crc-protocol.md](docs/i2c-crc-protocol.md)。
+I2C 帧格式与对端实现要求见 [v3 协议规范](docs/i2c-crc-protocol.md)。
 
 ## 平台要求
 
