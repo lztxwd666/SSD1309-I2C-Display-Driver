@@ -6,19 +6,16 @@ use std::io;
 /// 驱动全局错误。
 #[derive(Debug)]
 pub enum DriverError {
-    /// 底层 I/O 错误。
+    /// 底层 I/O 错误，包含协议会话失效或执行结果未知。
     Io(io::Error),
-    /// 接收端拒绝写入帧（NACK），或响应帧 CRC/长度校验失败。
+    /// 传输实现明确报告可安全跳过的帧校验失败。
     FrameRejected(io::Error),
     /// 驱动未初始化（recover 失败后）。
     NotInitialized,
 }
 
 impl DriverError {
-    /// 是否为帧校验失败。
-    ///
-    /// 写帧被接收端 NACK（长度或 CRC 校验失败），或状态读响应帧
-    /// CRC/长度不符时返回 `true`。
+    /// 是否为传输实现明确报告可安全跳过的帧校验失败。
     pub fn is_frame_rejected(&self) -> bool {
         matches!(self, Self::FrameRejected(_))
     }
@@ -45,8 +42,7 @@ impl std::error::Error for DriverError {
 
 impl From<io::Error> for DriverError {
     fn from(e: io::Error) -> Self {
-        // 约定：I2cDevice 实现用 InvalidData 表示帧校验失败
-        // （接收端 NACK 或响应帧 CRC/长度不符）
+        // InvalidData 保留给可安全跳过的帧拒绝。
         if e.kind() == io::ErrorKind::InvalidData {
             Self::FrameRejected(e)
         } else {

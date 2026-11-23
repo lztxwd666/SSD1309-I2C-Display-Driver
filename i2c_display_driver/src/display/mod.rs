@@ -215,9 +215,9 @@ impl DisplayBuilder {
 pub enum RenderStatus {
     /// 推帧成功。
     Ok,
-    /// 首帧失败，经 I2C 总线恢复后重试成功。
+    /// 首帧失败，经 I2C 会话重建后重试成功。
     Recovered,
-    /// 本帧被跳过（总线恢复失败、帧拒绝或恢复冷却期）。
+    /// 本帧被跳过（会话重建失败、帧拒绝或恢复冷却期）。
     Skipped,
 }
 
@@ -226,14 +226,16 @@ pub enum RenderStatus {
 pub struct DriverStats {
     /// 成功推送的显示帧数（一次 `render`/`render_region` 调用计一帧）。
     pub frames_pushed: u64,
-    /// 被跳过的显示帧数（总线恢复失败、帧拒绝或恢复冷却期）。
+    /// 被跳过的显示帧数（会话重建失败、帧拒绝或恢复冷却期）。
     pub frames_skipped: u64,
-    /// 成功执行的 I2C 总线恢复次数。
+    /// 成功重建 I2C 会话的次数。
     pub recoveries: u64,
     /// 累计错误次数（推帧与状态读取失败）。
     pub errors: u64,
-    /// 推帧路径被接收端 NACK 拒绝的显示帧数（长度或 CRC 校验失败）。
+    /// 推帧路径中底层明确报告可安全跳过的显示帧数。
     ///
+    /// 只有自定义传输通过 `InvalidData` 报告帧拒绝时才会增加；内置 v3 `I2cBus`
+    /// 在传输层重试帧错误，最终失败计入 `errors`。
     /// 不是 I2C 事务数：一次 `render`/`render_region` 可能包含多次 I2C 写入。
     pub frames_rejected: u64,
 }
@@ -327,6 +329,9 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     }
 
     /// 获取驱动运行统计（帧数 / 错误数 / 恢复次数 / 帧拒绝次数）。
+    ///
+    /// `frames_rejected` 只由自定义传输报告；内置 v3 `I2cBus` 的帧错误在传输层重试，
+    /// 最终失败计入 `errors`。
     pub fn stats(&self) -> DriverStats {
         self.stats
     }
@@ -418,8 +423,7 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     /// 滚动翻页动画：当前内容向左滚出，`page` 内容从右侧滚入。
     ///
     /// 动画共 `steps` 帧（每帧前进 `WIDTH/steps` 像素），`step_ms` 为每帧间隔；
-    /// 结束时屏幕内容与 `page` 完全一致。I2C 总线 100kHz 下每帧推帧约 100ms，
-    /// 建议 `steps=32`（动画约 3-4 秒）。
+    /// 结束时屏幕内容与 `page` 完全一致。动画总时长由每次推帧耗时与帧间隔决定。
     ///
     /// 阻塞式：动画期间占用调用线程。需要在动画帧之间执行其他工作时，
     /// 改用逐帧驱动的 [`scroll_to_page_frame`](Self::scroll_to_page_frame)。
@@ -488,14 +492,13 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
 
     /// 推帧（带自动恢复，最佳努力语义）。
     ///
-    /// 首次推帧因总线错误失败时复位 I2C 总线并重试一次；仍失败则跳过本帧
+    /// 首次推帧失败（非帧拒绝）时重建 I2C 会话并重试一次；仍失败则跳过本帧
     /// （记录日志、不返回错误），等待后续帧周期自行恢复。
-    /// 接收端 NACK（长度/CRC 校验失败）属于帧校验失败，不触发总线恢复，
-    /// 直接跳过本帧；底层 `I2cBus` 已按固定次数重试。
-    /// 恢复失败后进入冷却期（见 [`RECOVER_COOLDOWN`]），冷却期内
+    /// 传输实现明确报告 `FrameRejected` 时直接跳过本帧，保留会话。
+    /// v3 结果未知或会话失效时会重新打开连接、同步会话并初始化面板。
+    /// 恢复失败后进入冷却期（见 `RECOVER_COOLDOWN`），冷却期内
     /// 不再尝试恢复、直接跳过本帧，避免永久故障时每帧触发
     /// recover（关/开 fd + 全量初始化）造成系统调用与日志风暴。
-    /// 该策略经实测可靠：比进程崩溃或反复重试更稳。
     ///
     /// 返回 [`RenderStatus`] 供调用方区分成功 / 恢复后成功 / 跳过本帧。
     pub fn render_robust(&mut self) -> RenderStatus {
@@ -503,8 +506,6 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
             Ok(()) => RenderStatus::Ok,
             Err(e) => {
                 self.log(&format!("帧推送失败: {e}"));
-                // 接收端 NACK（长度/CRC 校验失败）不是总线故障：跳过本帧，
-                // 不重置总线。底层 I2cBus 已按固定次数重试，仍失败才到达这里。
                 if e.is_frame_rejected() {
                     self.stats.frames_skipped += 1;
                     return RenderStatus::Skipped;
@@ -526,7 +527,7 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
                         }
                     }
                     Err(e3) => {
-                        self.log(&format!("I2C 总线重置失败: {e3}，跳过本帧"));
+                        self.log(&format!("I2C 会话重建失败: {e3}，跳过本帧"));
                         self.stats.frames_skipped += 1;
                         RenderStatus::Skipped
                     }
@@ -700,7 +701,7 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
     /// 解析辅助见 [`status_busy`](Self::status_busy) 与
     /// [`status_booster`](Self::status_booster)。
     ///
-    /// 失败时计入 [`DriverStats::errors`]；帧校验失败不计入
+    /// 失败时计入 [`DriverStats::errors`]；传输实现报告 `FrameRejected` 时不计入
     /// [`DriverStats::frames_rejected`]（该字段只统计推帧路径）。
     pub fn read_status(&mut self) -> Result<u8, DriverError> {
         let result = {
@@ -756,16 +757,15 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
         self.render()
     }
 
-    /// 重置 I2C 总线并重新初始化 SSD1309。
+    /// 重建 I2C 会话并重新初始化 SSD1309。
     ///
-    /// 先关闭旧 I2C 连接（确保旧 fd 释放），再打开新连接并重新初始化
-    /// OLED 控制器。用于 I2C 总线卡死（SDA stuck / lost arbitration）后的恢复。
-    /// 恢复时沿用当前对比度、反色、显示开关与全屏点亮状态。
+    /// 关闭旧连接，打开并同步新连接后重新初始化 OLED 控制器。
+    /// 恢复时沿用面板设置，并标记完整帧缓冲待推送。
     ///
     /// 失败时记录恢复冷却（`render_robust` 在冷却期内不再自动重试）；
     /// 成功时清除冷却。
     pub fn recover(&mut self) -> Result<(), DriverError> {
-        self.log("正在重置 I2C 总线...");
+        self.log("正在重建 I2C 会话...");
         self.driver = None;
         let result: Result<Ssd1309<B>, DriverError> = B::open(self.config.bus_id, self.config.addr)
             .map_err(Into::into)
@@ -782,8 +782,9 @@ impl<B: I2cDevice + I2cDeviceFactory> Display<B> {
         match result {
             Ok(driver) => {
                 self.driver = Some(driver);
+                self.framebuffer.mark_all_dirty();
                 self.last_recover_failed = None;
-                self.log("I2C 总线重置成功");
+                self.log("I2C 会话重建成功");
                 Ok(())
             }
             Err(e) => {
@@ -910,7 +911,7 @@ mod tests {
         static REJECT_WRITE_COUNT: Cell<usize> = const { Cell::new(0) };
     }
 
-    /// 测试用总线：初始化阶段正常写入，可切换为 InvalidData 模拟接收端 NACK。
+    /// 测试用总线，在初始化后可用 InvalidData 模拟可跳过的帧拒绝。
     struct RejectingBus;
 
     fn reject_writes() -> std::io::Result<()> {
@@ -1105,13 +1106,22 @@ mod tests {
         config.display_on = false;
         let mut display = Display::<MockBus>::from_device(bus, config).unwrap();
         display.set_entire_display_on(true).unwrap();
+        display.render().unwrap();
+        assert_eq!(display.framebuffer.dirty_rect(), None);
 
         let factory_log = Arc::new(Mutex::new(Vec::new()));
         MockBus::set_factory(Arc::clone(&factory_log), 0);
         failures.set(usize::MAX);
         display.recover().unwrap();
+        assert_eq!(
+            display.framebuffer.dirty_rect(),
+            Some((0, 0, WIDTH, HEIGHT))
+        );
+        display.render_dirty().unwrap();
+        assert_eq!(display.framebuffer.dirty_rect(), None);
 
         let w = factory_log.lock().unwrap();
+        assert_eq!(w.iter().filter(|write| write.control == 0x40).count(), 8);
         // display_on=false 时恢复初始化不应发送 0xAF 唤醒
         assert!(!w.contains(&Write {
             control: 0x00,
@@ -1711,7 +1721,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|m| m.contains("重置成功"))
+                .any(|m| m.contains("会话重建成功"))
         );
     }
 }

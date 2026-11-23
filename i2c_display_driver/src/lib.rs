@@ -8,8 +8,8 @@
 //! * [`display::DisplayBuilder`] — 链式初始化配置
 //! * [`display::DisplayConfig`] — 可配置初始化（总线、地址、对比度/反色/显示开关/旋转/高级寄存器）
 //! * [`display::Framebuffer`] — 1-bit 帧缓冲（含脏矩形跟踪），实现 embedded-graphics `DrawTarget`
-//! * [`display::I2cBus`] — Linux I2C 传输：帧带长度字段与 Modbus CRC16，接收端 NACK 时自动重试并上报
-//! * [`display::DriverStats`] — 运行统计（帧数/错误数/恢复次数/帧拒绝次数）
+//! * [`display::I2cBus`] — Linux I2C v3 传输，使用带序号的 Modbus CRC16 帧和独立回执
+//! * [`display::DriverStats`] — 运行统计（帧数/错误数/恢复次数；帧拒绝仅自定义传输）
 //! * [`graphics`] — 文字（5×7）与基础图形绘制
 //! * [`DriverError`] — 统一错误类型
 //!
