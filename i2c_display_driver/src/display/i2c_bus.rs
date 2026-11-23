@@ -168,6 +168,11 @@ fn exchange(
                     }
                     let last_ok_seq = u16::from_le_bytes([reply[1], reply[2]]);
                     if last_ok_valid && seq == Some(last_ok_seq) {
+                        if frame[0] != PANEL_STATUS && reply[3] != 0 {
+                            return Err(io::Error::other(
+                                "I2C v3 非查询帧回执的 value 非零，结果未知",
+                            ));
+                        }
                         return Ok(reply[3]);
                     }
                     if syncing && status == Status::Synced && !busy {
@@ -549,6 +554,37 @@ mod tests {
             assert_eq!(elapsed, Duration::ZERO);
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Other);
         }
+    }
+
+    #[test]
+    fn nonquery_receipt_with_matching_sequence_requires_zero_value() {
+        let mut reply = [0x83, 2, 0, 0x81, 0, 0];
+        crc::append_crc(&mut reply, 4);
+        let (result, _) = run(
+            vec![
+                Step::Write(DATA_FRAME, Ok(DATA_FRAME.len())),
+                Step::Read(&reply, Duration::ZERO),
+            ],
+            DATA_FRAME,
+            Some(2),
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn stale_panel_status_value_does_not_invalidate_current_write() {
+        let mut reply = [0x83, 1, 0, 0x81, 0, 0];
+        crc::append_crc(&mut reply, 4);
+        let (result, _) = run(
+            vec![
+                Step::Write(DATA_FRAME, Ok(DATA_FRAME.len())),
+                Step::Read(&reply, Duration::ZERO),
+                Step::Read(OK_DATA, Duration::ZERO),
+            ],
+            DATA_FRAME,
+            Some(2),
+        );
+        assert_eq!(result.unwrap(), 0);
     }
 
     #[test]

@@ -8,7 +8,13 @@ from unittest.mock import call, patch
 
 from ssd1309_driver.crc import append_crc, strip_and_verify
 from ssd1309_driver.errors import FrameRejectedError, I2cError, InvalidDataError
-from ssd1309_driver.i2c_bus import I2cBus
+from ssd1309_driver.i2c_bus import (
+    I2cBus,
+    T_FRAME_NS,
+    T_POLL_NS,
+    T_PUBLISH_NS,
+    T_RESULT_NS,
+)
 
 SYNC = bytes.fromhex("7F 00 00 00 19 F0")
 SYNCED = bytes.fromhex("01 00 00 00 01 D8")
@@ -30,8 +36,9 @@ class I2cBusFramingTest(unittest.TestCase):
         self.clock = 0
         self.events = deque()
         self.writes = []
+        self.default_read = None
         module = "ssd1309_driver.i2c_bus"
-        stack.enter_context(patch(f"{module}.os.open", return_value=7))
+        self.open_fd = stack.enter_context(patch(f"{module}.os.open", return_value=7))
         self.close = stack.enter_context(patch(f"{module}.os.close"))
         self.ioctl = stack.enter_context(patch(f"{module}.fcntl.ioctl"))
         stack.enter_context(patch(f"{module}.os.write", side_effect=self._write))
@@ -53,8 +60,12 @@ class I2cBusFramingTest(unittest.TestCase):
 
     def _read(self, fd, length):
         self.assertEqual((fd, length), (7, 6))
-        kind, reply, delay = self.events.popleft()
-        self.assertEqual(kind, "read")
+        if self.events:
+            kind, reply, delay = self.events.popleft()
+            self.assertEqual(kind, "read")
+        else:
+            self.assertIsNotNone(self.default_read, "意外的读事务")
+            reply, delay = self.default_read
         self.clock += delay
         if isinstance(reply, OSError):
             raise reply
@@ -162,6 +173,41 @@ class I2cBusFramingTest(unittest.TestCase):
         self.assertEqual(self.writes[2][0] - self.writes[1][0], 108_000_000)
         self.assertFalse(self.events)
 
+    def test_no_receipt_times_out_without_replay(self):
+        self._open()
+        started = self.clock
+        self.events.append(("write", COMMAND, None))
+        self.default_read = (OSError(errno.EREMOTEIO, "地址未应答"), 0)
+
+        with self.assertRaisesRegex(I2cError, "确认超时，结果未知"):
+            self.bus.write_command(b"\xae")
+        self.assertEqual(self.clock - started, T_FRAME_NS)
+        self.assertEqual([frame for _, frame in self.writes], [SYNC, COMMAND])
+        self.assertIsNone(self.bus._next_seq)
+        with self.assertRaisesRegex(I2cError, "会话失效"):
+            self.bus.write_command(b"\xae")
+        self.assertFalse(self.events)
+
+    def test_open_sync_failure_closes_fd_and_allows_retry(self):
+        no_receiver = OSError(errno.ENXIO, "地址未应答")
+        self.events.append(("write", SYNC, no_receiver))
+        self.default_read = (no_receiver, 0)
+
+        with self.assertRaisesRegex(I2cError, "确认超时，结果未知"):
+            self.bus.open()
+        self.assertEqual(self.clock, T_FRAME_NS)
+        self.assertEqual([frame for _, frame in self.writes], [SYNC])
+        self.close.assert_called_once_with(7)
+        self.assertIsNone(self.bus._fd)
+        self.assertIsNone(self.bus._next_seq)
+
+        self.default_read = None
+        self._open()
+        self.assertEqual(self.open_fd.call_count, 2)
+        self.events.extend((("write", COMMAND, None), ("read", OK_COMMAND, 0)))
+        self.bus.write_command(b"\xae")
+        self.assertFalse(self.events)
+
     def test_stale_ok_and_crc_error_cannot_confirm_new_sequence(self):
         self._open()
         self.events.extend(
@@ -202,6 +248,103 @@ class I2cBusFramingTest(unittest.TestCase):
             self.bus.read_byte()
         self.assertFalse(self.events)
 
+    def test_pending_polls_until_success_without_replay(self):
+        self._open()
+        self.events.extend(
+            (
+                ("write", COMMAND, None),
+                ("read", append_crc(b"\x42\x00\x00\x00"), T_RESULT_NS),
+                ("read", OK_COMMAND, 0),
+            )
+        )
+        self.bus.write_command(b"\xae")
+        self.assertEqual([frame for _, frame in self.writes], [SYNC, COMMAND])
+        self.assertFalse(self.events)
+
+    def test_receiver_errors_retry_same_frame_after_their_wait_window(self):
+        for code, delay in (
+            (0x05, T_PUBLISH_NS),
+            (0x08, T_PUBLISH_NS),
+            (0x07, T_RESULT_NS),
+        ):
+            with self.subTest(code=code):
+                self.bus.close()
+                self._open()
+                reply = append_crc(bytes((code, 0, 0, 0)))
+                self.events.extend(
+                    (
+                        ("write", COMMAND, None),
+                        ("read", reply, 0),
+                        ("read", reply, delay - T_POLL_NS),
+                        ("write", COMMAND, None),
+                        ("read", OK_COMMAND, 0),
+                    )
+                )
+                self.bus.write_command(b"\xae")
+                self.assertEqual(
+                    self.writes[-1][0] - self.writes[-2][0], delay + T_POLL_NS
+                )
+                self.assertFalse(self.events)
+
+    def test_busy_with_matching_success_confirms_immediately(self):
+        self._open()
+        started = self.clock
+        self.events.extend(
+            (
+                ("write", COMMAND, None),
+                ("read", append_crc(b"\xc3\x01\x00\x00"), 0),
+            )
+        )
+        self.bus.write_command(b"\xae")
+        self.assertEqual(self.clock, started)
+        self.assertEqual(self.bus._next_seq, 2)
+        self.assertFalse(self.events)
+
+    def test_busy_drop_replays_only_after_busy_clears(self):
+        self._open()
+        self.events.extend(
+            (
+                ("write", COMMAND, None),
+                ("read", OK_COMMAND, 0),
+                ("write", DATA, None),
+                ("read", BUSY_DROP, T_RESULT_NS),
+                ("read", append_crc(b"\x86\x01\x00\x00"), 0),
+                ("write", DATA, None),
+                ("read", OK_DATA, 0),
+            )
+        )
+        self.bus.write_command(b"\xae")
+        self.bus.write_data(b"\x01\x02")
+        self.assertEqual(
+            self.writes[-1][0] - self.writes[-2][0], T_RESULT_NS + 2 * T_POLL_NS
+        )
+        self.assertFalse(self.events)
+
+    def test_persistent_bad_crc_replays_same_frame_then_invalidates_session(self):
+        self._open()
+        started = self.clock
+        bad_reply = OK_COMMAND[:-1] + b"\x61"
+        replay_interval = T_RESULT_NS + 2 * T_POLL_NS
+        replays, remaining = divmod(T_FRAME_NS, replay_interval)
+        for _ in range(replays):
+            self.events.extend(
+                (
+                    ("write", COMMAND, None),
+                    ("read", bad_reply, T_RESULT_NS),
+                    ("read", bad_reply, 0),
+                )
+            )
+        self.events.extend((("write", COMMAND, None), ("read", bad_reply, remaining)))
+
+        with self.assertRaisesRegex(I2cError, "确认超时，结果未知"):
+            self.bus.write_command(b"\xae")
+        self.assertEqual(self.clock - started, T_FRAME_NS)
+        self.assertEqual(
+            [frame for _, frame in self.writes[1:]], [COMMAND] * (replays + 1)
+        )
+        self.assertIsNone(self.bus._next_seq)
+        self.assertFalse(self.events)
+
     def test_link_reset_requires_reopen_and_restarts_sequence(self):
         self._open()
         self.events.extend((("write", COMMAND, None), ("read", NEED_SYNC, 0)))
@@ -211,6 +354,41 @@ class I2cBusFramingTest(unittest.TestCase):
         self.close.assert_called_once_with(7)
         self.events.extend((("write", COMMAND, None), ("read", OK_COMMAND, 0)))
         self.bus.write_command(b"\xae")
+        self.assertFalse(self.events)
+
+    def test_out_of_sequence_and_downstream_unknown_invalidate_session(self):
+        for flags, status in ((0x89, "OUT_OF_SEQUENCE"), (0x8A, "DOWNSTREAM_UNKNOWN")):
+            with self.subTest(status=status):
+                self.bus.close()
+                self._open()
+                self.events.extend(
+                    (
+                        ("write", COMMAND, None),
+                        ("read", append_crc(bytes((flags, 1, 0, 0))), 0),
+                    )
+                )
+                with self.assertRaisesRegex(I2cError, status):
+                    self.bus.write_command(b"\xae")
+                self.assertIsNone(self.bus._next_seq)
+                with self.assertRaisesRegex(I2cError, "会话失效"):
+                    self.bus.read_byte()
+                self.assertFalse(self.events)
+
+    def test_sequence_wraps_after_ffff(self):
+        self._open()
+        self.bus._next_seq = 0xFFFF
+        self.events.extend(
+            (
+                ("write", append_crc(bytes.fromhex("00 01 FF FF AE")), None),
+                ("read", append_crc(bytes.fromhex("83 FF FF 00")), 0),
+                ("write", append_crc(bytes.fromhex("00 01 00 00 AE")), None),
+                ("read", append_crc(bytes.fromhex("42 00 00 00")), 0),
+                ("read", bytes.fromhex("83 00 00 00 29 A0"), 0),
+            )
+        )
+        self.bus.write_command(b"\xae")
+        self.bus.write_command(b"\xae")
+        self.assertEqual(self.bus._next_seq, 1)
         self.assertFalse(self.events)
 
     def test_unknown_state_is_protocol_error_even_for_matching_sequence(self):
@@ -238,6 +416,40 @@ class I2cBusFramingTest(unittest.TestCase):
                 with self.assertRaisesRegex(I2cError, "回执字段不一致"):
                     self.bus.write_command(b"\xae")
                 self.assertFalse(self.events)
+
+    def test_nonquery_receipt_with_matching_sequence_requires_zero_value(self):
+        for kind in (0x00, 0x40):
+            with self.subTest(kind=kind):
+                self.bus.close()
+                self._open()
+                expected = append_crc(bytes((kind, 1, 1, 0, 0xAE)))
+                self.events.extend(
+                    (
+                        ("write", expected, None),
+                        ("read", append_crc(b"\x83\x01\x00\x81"), 0),
+                    )
+                )
+                write = self.bus.write_command if kind == 0x00 else self.bus.write_data
+                with self.assertRaisesRegex(I2cError, "非查询帧回执的 value 非零"):
+                    write(b"\xae")
+                self.assertIsNone(self.bus._next_seq)
+                self.assertFalse(self.events)
+
+    def test_stale_panel_status_value_does_not_invalidate_current_write(self):
+        self._open()
+        query_reply = append_crc(b"\x83\x01\x00\x81")
+        self.events.extend(
+            (
+                ("write", append_crc(b"\x01\x00\x01\x00"), None),
+                ("read", query_reply, 0),
+                ("write", DATA, None),
+                ("read", query_reply, 0),
+                ("read", OK_DATA, 0),
+            )
+        )
+        self.assertEqual(self.bus.read_byte(), 0x81)
+        self.bus.write_data(b"\x01\x02")
+        self.assertFalse(self.events)
 
     def test_invalid_payload_does_not_advance_sequence_and_max_size_is_accepted(self):
         self._open()

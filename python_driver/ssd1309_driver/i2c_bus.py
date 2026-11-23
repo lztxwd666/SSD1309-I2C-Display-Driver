@@ -123,6 +123,8 @@ def _exchange(fd: int, kind: int, seq: Optional[int], payload: bytes) -> int:
                         f"I2C v3 会话失效（{status.name}），结果未知，须重新打开并初始化面板"
                     )
                 if last_ok_valid and seq == (seq_l | (seq_h << 8)):
+                    if kind != PANEL_STATUS and value != 0:
+                        raise I2cError("I2C v3 非查询帧回执的 value 非零，结果未知")
                     return value
                 if syncing and status == _Status.SYNCED and not busy:
                     return 0

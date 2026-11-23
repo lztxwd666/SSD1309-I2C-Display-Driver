@@ -4,7 +4,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from ssd1309_driver import Display, DisplayConfig, RenderStatus
-from ssd1309_driver.errors import FrameRejectedError, I2cError
+from ssd1309_driver.display import RECOVER_COOLDOWN
+from ssd1309_driver.errors import FrameRejectedError, I2cError, NotInitializedError
 
 
 class RejectingDriver:
@@ -86,6 +87,86 @@ class DisplayFrameRejectedTest(unittest.TestCase):
         self.assertIsNone(display.framebuffer.dirty_rect())
         self.assertEqual(display.stats.recoveries, 1)
         self.assertEqual(display.stats.frames_rejected, 0)
+
+    def test_recover_failure_enforces_cooldown_until_next_attempt(self):
+        old_driver = FailingDriver(I2cError("链路断开"))
+        old_driver.bus = Mock()
+        display = Display(old_driver, DisplayConfig(bus_id=1, addr=0x3C))
+        display.set_logger(lambda _msg: None)
+        bus = Mock()
+        driver = Mock()
+        with (
+            patch("ssd1309_driver.display.I2cBus") as factory,
+            patch(
+                "ssd1309_driver.display.Ssd1309.init_with_config", return_value=driver
+            ) as init,
+            patch("ssd1309_driver.display.time.monotonic", return_value=10.0) as now,
+        ):
+            factory.return_value.open.side_effect = [I2cError("同步失败"), bus]
+            self.assertEqual(display.render_robust(), RenderStatus.SKIPPED)
+
+            now.return_value = 10.0 + RECOVER_COOLDOWN / 2
+            self.assertEqual(display.render_robust(), RenderStatus.SKIPPED)
+            factory.assert_called_once_with(1, 0x3C)
+            init.assert_not_called()
+
+            now.return_value = 10.0 + RECOVER_COOLDOWN
+            self.assertEqual(display.render_robust(), RenderStatus.RECOVERED)
+
+        old_driver.bus.close.assert_called_once_with()
+        self.assertEqual(factory.call_count, 2)
+        init.assert_called_once_with(bus, display.config)
+        driver.push_frame.assert_called_once_with(display.framebuffer)
+        self.assertEqual(display.stats.frames_skipped, 2)
+        self.assertEqual(display.stats.recoveries, 1)
+
+    def test_recover_closes_new_bus_when_panel_initialization_fails(self):
+        old_driver = FailingDriver(I2cError("链路断开"))
+        old_driver.bus = Mock()
+        display = Display(old_driver, DisplayConfig(bus_id=1, addr=0x3C))
+        display.set_logger(lambda _msg: None)
+        display.framebuffer.set_pixel(3, 4, True)
+        bus = Mock()
+        with (
+            patch("ssd1309_driver.display.I2cBus") as factory,
+            patch(
+                "ssd1309_driver.display.Ssd1309.init_with_config",
+                side_effect=I2cError("面板初始化失败"),
+            ),
+        ):
+            factory.return_value.open.return_value = bus
+            self.assertEqual(display.render_robust(), RenderStatus.SKIPPED)
+
+        old_driver.bus.close.assert_called_once_with()
+        bus.close.assert_called_once_with()
+        with self.assertRaises(NotInitializedError):
+            display.render()
+        self.assertEqual(display.framebuffer.dirty_rect(), (3, 4, 1, 1))
+        self.assertEqual(display.stats.frames_skipped, 1)
+        self.assertEqual(display.stats.recoveries, 0)
+
+    def test_first_frame_failure_after_recover_counts_recovery_and_skip(self):
+        old_driver = FailingDriver(I2cError("链路断开"))
+        old_driver.bus = Mock()
+        display = Display(old_driver, DisplayConfig(bus_id=1, addr=0x3C))
+        display.set_logger(lambda _msg: None)
+        driver = Mock()
+        driver.push_frame.side_effect = I2cError("恢复后推帧失败")
+        with (
+            patch("ssd1309_driver.display.I2cBus") as factory,
+            patch(
+                "ssd1309_driver.display.Ssd1309.init_with_config", return_value=driver
+            ),
+        ):
+            self.assertEqual(display.render_robust(), RenderStatus.SKIPPED)
+
+        factory.assert_called_once_with(1, 0x3C)
+        driver.push_frame.assert_called_once_with(display.framebuffer)
+        self.assertEqual(display.framebuffer.dirty_rect(), (0, 0, 128, 64))
+        self.assertEqual(display.stats.frames_pushed, 0)
+        self.assertEqual(display.stats.frames_skipped, 1)
+        self.assertEqual(display.stats.recoveries, 1)
+        self.assertEqual(display.stats.errors, 2)
 
 
 if __name__ == "__main__":
