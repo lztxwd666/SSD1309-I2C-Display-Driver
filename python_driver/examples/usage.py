@@ -5,7 +5,6 @@ import time
 
 from ssd1309_driver import (
     BlitMode,
-    Display,
     DisplayBuilder,
     DisplayRotation,
     I2cError,
@@ -85,10 +84,10 @@ def main() -> None:
     # 4. 推帧方式
     fb.clear()
     draw_text(fb, 0, 0, "RENDER")
-    display.render()              # 全帧
+    display.render()  # 全帧
     pause(300)
     draw_text(fb, 0, 12, "DIRTY")
-    display.render_dirty()        # 脏矩形
+    display.render_dirty()  # 脏矩形
     pause(300)
     display.render_region(0, 0, 128, 64)
     pause(300)
@@ -135,12 +134,9 @@ def main() -> None:
     display.render()
     pause(500)
 
-    # 8. 状态读取
+    # 8. 读取接收端返回的状态原始字节
     st = display.read_status()
-    print(
-        f"status=0x{st:02X} busy={Display.status_busy(st)} "
-        f"booster={Display.status_booster(st)}"
-    )
+    print(f"status=0x{st:02X}")
 
     # 9. 硬件滚动兼容入口
     display.hardware_scroll_horizontal(ScrollDirection.LEFT, 0, 7, 0x00)

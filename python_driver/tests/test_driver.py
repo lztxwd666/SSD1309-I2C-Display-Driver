@@ -66,17 +66,20 @@ class UsageExampleTest(unittest.TestCase):
     def test_usage_opens_once_before_recover(self):
         initial_bus = MockBus()
         recovered_bus = MockBus()
-        with patch("ssd1309_driver.display.I2cBus") as factory, patch(
-            "time.sleep"
-        ), patch.object(initial_bus, "close") as close, redirect_stdout(
-            io.StringIO()
-        ) as output:
+        with (
+            patch("ssd1309_driver.display.I2cBus") as factory,
+            patch("time.sleep"),
+            patch.object(initial_bus, "close") as close,
+            redirect_stdout(io.StringIO()) as output,
+        ):
             factory.return_value.open.side_effect = [initial_bus, recovered_bus]
             runpy.run_path(str(self.path), run_name="__main__")
 
         self.assertEqual(factory.call_args_list, [call(1, 0x3C)] * 2)
         close.assert_called_once_with()
-        self.assertIn("done", output.getvalue())
+        lines = output.getvalue().splitlines()
+        self.assertIn("status=0x01", lines)
+        self.assertIn("done", lines)
 
     def test_usage_reports_i2c_failure_as_unsuccessful_exit(self):
         with patch("ssd1309_driver.display.I2cBus") as factory:
