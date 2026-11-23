@@ -18,11 +18,11 @@ class DriverError(Exception):
 
 
 class I2cError(DriverError):
-    """I2C 通信错误。"""
+    """I2C 通信错误，包含协议会话失效或执行结果未知。"""
 
 
 class FrameRejectedError(I2cError):
-    """接收端 NACK 拒绝写入帧（长度或 CRC 校验失败），或响应帧校验失败。"""
+    """传输实现明确报告可安全跳过的帧校验失败。"""
 
 
 class NotInitializedError(DriverError):

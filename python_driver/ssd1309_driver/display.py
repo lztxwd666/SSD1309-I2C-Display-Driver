@@ -29,7 +29,7 @@ class DriverStats:
     frames_skipped: int = 0
     recoveries: int = 0
     errors: int = 0
-    # 推帧路径被接收端 NACK 拒绝的帧数（长度或 CRC 校验失败）
+    # 推帧路径中底层明确报告可安全跳过的显示帧数
     frames_rejected: int = 0
 
 
@@ -214,7 +214,6 @@ class Display:
             return RenderStatus.OK
         except DriverError as e:
             self._log(f"帧推送失败: {e}")
-            # 接收端 NACK 属于帧校验失败，不是总线故障：跳过本帧，不重置总线。
             if isinstance(e, FrameRejectedError):
                 self.stats.frames_skipped += 1
                 return RenderStatus.SKIPPED
@@ -225,7 +224,7 @@ class Display:
                 self.recover()
                 self.stats.recoveries += 1
             except DriverError as e2:
-                self._log(f"I2C 总线重置失败: {e2}")
+                self._log(f"I2C 会话重建失败: {e2}")
                 self.stats.frames_skipped += 1
                 return RenderStatus.SKIPPED
             try:
@@ -372,18 +371,23 @@ class Display:
             self._scroll_source = None
 
     def recover(self) -> None:
-        self._log("正在重置 I2C 总线...")
+        self._log("正在重建 I2C 会话...")
         if self._driver is not None:
             self._driver.bus.close()
         self._driver = None
         try:
             bus = I2cBus(self.config.bus_id, self.config.addr).open()
-            driver = Ssd1309.init_with_config(bus, self.config)
-            if self._entire_display_on:
-                driver.set_entire_display_on(True)
+            try:
+                driver = Ssd1309.init_with_config(bus, self.config)
+                if self._entire_display_on:
+                    driver.set_entire_display_on(True)
+            except BaseException:
+                bus.close()
+                raise
             self._driver = driver
+            self.framebuffer.mark_all_dirty()
             self._last_recover_failed = None
-            self._log("I2C 总线重置成功")
+            self._log("I2C 会话重建成功")
         except DriverError:
             self._last_recover_failed = time.monotonic()
             raise

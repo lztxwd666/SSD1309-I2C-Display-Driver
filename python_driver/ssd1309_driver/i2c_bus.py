@@ -1,63 +1,197 @@
-"""Linux I2C 总线底层封装
+"""Linux I2C v3 发送端，使用独立写事务和读事务。
 
-直接操作 /dev/i2c-N，通过 ioctl 绑定从机地址后使用 write/read 通信。
-
-写帧格式（协议 v2）：
-- 命令/数据帧：控制字节 + 1 字节载荷长度 + 载荷 + Modbus CRC16
-- 状态读请求：0x00 0x00 + CRC
-- 状态读响应：状态字节 + CRC（3 字节）
-
-CRC 覆盖控制字节、长度字节与载荷，低字节在前。接收端根据长度字段确定
-帧尾，在最后一个字节（CRC_H）的 ACK 周期校验长度与 CRC，失败时必须 NACK；
-Linux i2c-dev 通常将 NACK 映射为 EREMOTEIO，本层据此重试并上报。
-帧格式见项目 docs/i2c-crc-protocol.md。
+帧格式见 docs/i2c-crc-protocol.md。
 """
 
-import errno
 import fcntl
 import os
+import time
+from enum import IntEnum
+from threading import Lock
 from typing import Optional
 
 from .crc import append_crc, strip_and_verify
-from .errors import FrameRejectedError, I2cError, InvalidDataError
+from .errors import I2cError, InvalidDataError
 
 I2C_SLAVE = 0x0703
+I2C_TIMEOUT = 0x0702
+T_IO_10MS = 10
 
-# 单帧命令/数据载荷上限
+COMMAND = 0x00
+DATA = 0x40
+PANEL_STATUS = 0x01
+SYNC = 0x7F
 MAX_PAYLOAD = 255
-# 接收端 NACK 后的重试次数（不含首次发送）
-FRAME_RETRIES = 2
-# 按帧拒绝处理的 errno（Linux EREMOTEIO）；非 Linux 平台回退到 121
-EREMOTEIO = getattr(errno, "EREMOTEIO", 121)
+RECEIPT_LEN = 6
+LAST_OK_VALID = 0x80
+BUSY = 0x40
+
+T_PUBLISH_NS = 5_000_000
+T_RESULT_NS = 100_000_000
+T_POLL_NS = 2_000_000
+T_FRAME_NS = 500_000_000
+
+
+class _Status(IntEnum):
+    NEED_SYNC = 0x00
+    SYNCED = 0x01
+    PENDING = 0x02
+    OK = 0x03
+    CRC_ERROR = 0x04
+    FORMAT_ERROR = 0x05
+    BUSY_DROP = 0x06
+    RX_OVERFLOW = 0x07
+    RX_TIMEOUT = 0x08
+    OUT_OF_SEQUENCE = 0x09
+    DOWNSTREAM_UNKNOWN = 0x0A
+
+
+_SYNC_REQUIRED = (
+    _Status.NEED_SYNC,
+    _Status.OUT_OF_SEQUENCE,
+    _Status.DOWNSTREAM_UNKNOWN,
+)
+_EARLY_RETRY = (
+    _Status.CRC_ERROR,
+    _Status.FORMAT_ERROR,
+    _Status.BUSY_DROP,
+    _Status.RX_TIMEOUT,
+)
+
+
+def _exchange(fd: int, kind: int, seq: Optional[int], payload: bytes) -> int:
+    syncing = seq is None
+    sequence = 0 if seq is None else seq
+    frame = append_crc(
+        bytes((kind, len(payload))) + sequence.to_bytes(2, "little") + payload
+    )
+    deadline = time.monotonic_ns() + T_FRAME_NS
+    detail = "未读取到回执"
+    cause = None
+    while time.monotonic_ns() < deadline:
+        # 短写时整帧重试，剩余字节不能作为新事务发送。
+        try:
+            count = os.write(fd, frame)
+            if count != len(frame):
+                detail, cause = f"短写 {count}/{len(frame)}", None
+        except OSError as exc:
+            detail, cause = "写事务失败", exc
+        written_at = time.monotonic_ns()
+        if syncing and written_at < deadline:
+            time.sleep(min(T_PUBLISH_NS, deadline - written_at) / 1_000_000_000)
+
+        busy = False
+        failed_reads = 0
+        while time.monotonic_ns() < deadline:
+            body = None
+            bus_readable = False
+            try:
+                reply = os.read(fd, RECEIPT_LEN)
+                bus_readable = bool(reply)
+                if len(reply) != RECEIPT_LEN:
+                    detail, cause = f"回执短读 {len(reply)}/{RECEIPT_LEN}", None
+                else:
+                    body = strip_and_verify(reply)
+            except OSError as exc:
+                detail, cause = "读事务失败", exc
+            except ValueError as exc:
+                detail, cause = str(exc), None
+            now = time.monotonic_ns()
+            if now >= deadline:
+                break
+
+            retry_after = T_RESULT_NS
+            if body is not None:
+                failed_reads = 0
+                flags, seq_l, seq_h, value = body
+                code = flags & 0x3F
+                try:
+                    status = _Status(code)
+                except ValueError as exc:
+                    raise I2cError(
+                        f"I2C v3 回执状态码未知: 0x{code:02X}，结果未知"
+                    ) from exc
+                last_ok_valid = bool(flags & LAST_OK_VALID)
+                busy = bool(flags & BUSY)
+                if (
+                    not last_ok_valid
+                    and (status == _Status.OK or seq_l or seq_h or value)
+                ) or (status == _Status.SYNCED and last_ok_valid):
+                    raise I2cError("I2C v3 回执字段不一致，结果未知")
+                if not syncing and status in _SYNC_REQUIRED:
+                    raise I2cError(
+                        f"I2C v3 会话失效（{status.name}），结果未知，须重新打开并初始化面板"
+                    )
+                if last_ok_valid and seq == (seq_l | (seq_h << 8)):
+                    return value
+                if syncing and status == _Status.SYNCED and not busy:
+                    return 0
+                if status in _EARLY_RETRY or (syncing and status in _SYNC_REQUIRED):
+                    retry_after = T_PUBLISH_NS
+                detail, cause = f"回执 {status.name}，未确认当前操作", None
+            else:
+                failed_reads += 1
+
+            # 坏回执保留已知的 BUSY 状态。读事务恢复返回字节后才可重发。
+            time.sleep(min(T_POLL_NS, deadline - now) / 1_000_000_000)
+            if (
+                bus_readable
+                and not busy
+                and failed_reads != 1
+                and now - written_at >= retry_after
+            ):
+                break
+
+    raise I2cError(f"I2C v3 确认超时，结果未知: {detail}", cause)
 
 
 class I2cBus:
-    """Linux I2C 设备总线"""
+    """Linux I2C 总线。每个设备地址应由一个 v3 会话独占。"""
 
     def __init__(self, bus_id: int, addr: int):
         self.bus_id = bus_id
         self.addr = addr
+        self._lock = Lock()
         self._fd: Optional[int] = None
+        self._next_seq: Optional[int] = None
 
     def open(self) -> "I2cBus":
-        """打开 /dev/i2c-{bus} 并绑定从机地址"""
-        path = f"/dev/i2c-{self.bus_id}"
-        fd = os.open(path, os.O_RDWR)
-        try:
-            fcntl.ioctl(fd, I2C_SLAVE, self.addr)
-        except OSError as e:
+        """打开设备，设置适配器级事务超时并同步 v3 会话。
+
+        超时为适配器级设置，关闭连接不会恢复原值。
+        """
+        with self._lock:
+            if self._fd is not None:
+                if self._next_seq is not None:
+                    return self
+                self._close_locked()
+            path = f"/dev/i2c-{self.bus_id}"
+            fd = None
+            try:
+                fd = os.open(path, os.O_RDWR)
+                fcntl.ioctl(fd, I2C_SLAVE, self.addr)
+                fcntl.ioctl(fd, I2C_TIMEOUT, T_IO_10MS)
+                _exchange(fd, SYNC, None, b"")
+                self._next_seq, self._fd = 1, fd
+            except OSError as exc:
+                raise I2cError(
+                    f"无法打开或配置 I2C 设备 {path} 地址 {self.addr:#x}", exc
+                ) from exc
+            finally:
+                if fd is not None and self._fd is None:
+                    os.close(fd)
+            return self
+
+    def _close_locked(self) -> None:
+        fd, self._fd = self._fd, None
+        self._next_seq = None
+        if fd is not None:
             os.close(fd)
-            raise I2cError(
-                f"无法打开 I2C 设备 {path} 或设置从机地址 {self.addr:#x}", e
-            ) from e
-        self._fd = fd
-        return self
 
     def close(self) -> None:
-        """关闭 I2C 设备"""
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
+        """关闭 I2C 设备并结束会话。"""
+        with self._lock:
+            self._close_locked()
 
     def __enter__(self) -> "I2cBus":
         return self.open()
@@ -65,89 +199,29 @@ class I2cBus:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    @staticmethod
-    def _build_frame(control: int, data: bytes) -> bytes:
-        """组装写帧：控制字节 + 载荷长度 + 载荷 + CRC（低字节在前）。"""
-        if len(data) > MAX_PAYLOAD:
-            raise InvalidDataError(f"I2C 帧载荷过长: {len(data)} > {MAX_PAYLOAD}")
-        body = bytes((control, len(data))) + data
-        return append_crc(body)
-
-    @staticmethod
-    def _is_data_nack(exc: I2cError) -> bool:
-        """判断异常是否按接收端拒绝本帧处理。
-
-        当前策略把 EREMOTEIO 一律视为帧拒绝；RP1/DesignWare 的地址 NACK、
-        SDA stuck 也可能返回该 errno，此时同样按帧拒绝处理。
-        """
-        cause = exc.cause
-        return isinstance(cause, OSError) and cause.errno == EREMOTEIO
-
-    def _write(self, buf: bytes) -> None:
-        if self._fd is None:
-            raise I2cError("I2C 总线未打开")
-        try:
-            written = os.write(self._fd, buf)
-        except OSError as e:
-            raise I2cError("I2C 写入失败", e) from e
-        if written != len(buf):
-            raise I2cError(f"I2C 写入不完整: {written}/{len(buf)}")
-
-    def _write_frame(self, control: int, data: bytes) -> None:
-        frame = self._build_frame(control, data)
-        for attempt in range(FRAME_RETRIES + 1):
-            try:
-                self._write(frame)
-                return
-            except I2cError as e:
-                if not self._is_data_nack(e):
-                    raise
-                if attempt >= FRAME_RETRIES:
-                    raise FrameRejectedError(
-                        "I2C 帧被接收端拒绝"
-                        f"（长度或 CRC 校验失败，已重试 {FRAME_RETRIES} 次）",
-                        e,
-                    ) from e
+    def _send(self, kind: int, payload: bytes) -> int:
+        if kind != PANEL_STATUS and not 1 <= len(payload) <= MAX_PAYLOAD:
+            raise InvalidDataError(
+                f"I2C 载荷长度必须为 1–{MAX_PAYLOAD} 字节，实际 {len(payload)}"
+            )
+        with self._lock:
+            if self._fd is None:
+                raise I2cError("I2C 总线未打开")
+            if self._next_seq is None:
+                raise I2cError("I2C v3 会话失效，须重新打开并初始化面板")
+            seq, self._next_seq = self._next_seq, None
+            value = _exchange(self._fd, kind, seq, payload)
+            self._next_seq = (seq + 1) & 0xFFFF
+            return value
 
     def write_command(self, data: bytes) -> None:
-        """发送命令（0x00 控制字节前缀，末尾 Modbus CRC16）"""
-        self._write_frame(0x00, data)
+        """发送 SSD1309 命令并等待确认。"""
+        self._send(COMMAND, data)
 
     def write_data(self, data: bytes) -> None:
-        """发送 GDDRAM 数据（0x40 控制字节前缀，末尾 Modbus CRC16）"""
-        self._write_frame(0x40, data)
+        """发送 GDDRAM 数据并等待确认。"""
+        self._send(DATA, data)
 
     def read_byte(self) -> int:
-        """读取一个字节（SSD1309 状态寄存器）
-
-        先发送状态读请求帧（0x00 0x00 + CRC，线上 00 00 01 B0），再读取
-        3 字节响应（状态字节 + CRC_L + CRC_H），校验通过后返回状态字节。
-        响应长度或 CRC 不符时重试整次读取，最多重试 FRAME_RETRIES 次；
-        其他 I/O 错误直接返回。
-        """
-        if self._fd is None:
-            raise I2cError("I2C 总线未打开")
-        for attempt in range(FRAME_RETRIES + 1):
-            try:
-                return self._read_status_once()
-            except FrameRejectedError:
-                if attempt >= FRAME_RETRIES:
-                    raise
-        raise AssertionError("状态读取重试循环不可达")
-
-    def _read_status_once(self) -> int:
-        """发送一次状态读请求并校验 3 字节响应，供重试循环使用。"""
-        self._write_frame(0x00, b"")
-        try:
-            buf = os.read(self._fd, 3)
-        except OSError as e:
-            raise I2cError("I2C 读取失败", e) from e
-        if len(buf) != 3:
-            raise FrameRejectedError(
-                f"I2C 状态帧长度错误: 期望 3 字节，实际 {len(buf)} 字节"
-            )
-        try:
-            body = strip_and_verify(buf)
-        except ValueError as e:
-            raise FrameRejectedError("I2C 状态帧 CRC 校验失败", e) from e
-        return body[0]
+        """查询 SSD1309 状态寄存器并返回一个已确认的状态字节。"""
+        return self._send(PANEL_STATUS, b"")
