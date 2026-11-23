@@ -22,7 +22,7 @@ display.render()
 # 注意：不要立即调用 display.sleep()，否则屏幕会熄灭
 ```
 
-详细示例见 `examples/`。
+示例的安装与运行步骤见 [Python 驱动测试](examples/TESTING.md)。
 
 ## I2C 帧校验（协议 v3）
 
@@ -60,9 +60,9 @@ except DriverError as e:
 
 ## 完整接口示例
 
-`examples/usage.py` 覆盖了全部公共接口，包括：
+`examples/usage.py` 演示以下接口。
 
-- Display / DisplayBuilder 初始化
+- DisplayBuilder 初始化
 - 帧缓冲与 blit
 - 全部图形绘制函数
 - 全帧/脏矩形/局部/鲁棒推帧
