@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""完整 API 使用参考，覆盖全部公共接口。"""
+"""演示 Python 显示、状态读取和恢复接口。"""
 
 import time
 
@@ -7,7 +7,6 @@ from ssd1309_driver import (
     BlitMode,
     Display,
     DisplayBuilder,
-    DisplayConfig,
     DisplayRotation,
     I2cError,
     NotInitializedError,
@@ -39,11 +38,7 @@ def pause(ms: int) -> None:
 
 
 def main() -> None:
-    # 1. 初始化方式
-    # 方式一：直接打开
-    display = Display.open(1, 0x3C)
-
-    # 方式二：Builder
+    # 1. 使用 Builder 初始化会话
     display = (
         DisplayBuilder(1, 0x3C)
         .with_contrast(0xCF)
@@ -52,10 +47,6 @@ def main() -> None:
         .with_rotation(DisplayRotation.ROTATE_0)
         .build()
     )
-
-    # 方式三：DisplayConfig
-    config = DisplayConfig(bus_id=1, addr=0x3C)
-    # display = Display.open_config(config)
 
     # 日志回调
     display.set_logger(lambda msg: print(f"[驱动日志] {msg}"))
@@ -184,4 +175,4 @@ if __name__ == "__main__":
     try:
         main()
     except (I2cError, NotInitializedError) as e:
-        print(f"驱动错误: {e}")
+        raise SystemExit(f"驱动错误: {e}") from e
