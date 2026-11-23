@@ -7,7 +7,7 @@
    ```bash
    cd python_driver
    python3 -m venv .venv
-   source .venv/bin/activate
+   source .venv/bin/activate.fish
    ```
 
 2. 安装当前目录的驱动。
