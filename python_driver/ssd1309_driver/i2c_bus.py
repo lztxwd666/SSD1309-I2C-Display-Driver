@@ -1,6 +1,6 @@
 """Linux I2C v3 发送端，使用独立写事务和读事务。
 
-帧格式见 docs/i2c-crc-protocol.md。
+非查询帧的匹配回执要求 value 为 0。帧格式见 docs/i2c-crc-protocol.md。
 """
 
 import fcntl

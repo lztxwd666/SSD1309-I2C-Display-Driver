@@ -16,7 +16,7 @@
    python -m pip install -e .
    ```
 
-3. 运行单元测试。无需连接屏幕，全部通过时末尾显示 `OK`。
+3. 运行单元测试。无需连接屏幕，覆盖 v3 回执重读/重发/会话失效、Display 恢复等错误路径；全部通过时末尾显示 `OK`。
 
    ```bash
    python -m unittest discover -s tests -v

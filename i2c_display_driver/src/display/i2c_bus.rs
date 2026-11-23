@@ -1,7 +1,8 @@
 //! Linux I2C 发送端，使用独立写事务和读事务实现 v3 帧协议。
 //!
 //! 写帧含长度、序号与 Modbus CRC16。主机验证接收端的固定长度回执，
-//! 并在确认成功后推进序号。帧格式见 `docs/i2c-crc-protocol.md`。
+//! 非查询帧的匹配回执还要求 `value` 为 0；确认成功后推进序号。
+//! 帧格式见 `docs/i2c-crc-protocol.md`。
 
 use std::fs;
 use std::io::{self, Read, Write};

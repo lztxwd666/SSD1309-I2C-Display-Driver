@@ -5,7 +5,8 @@
 ```bash
 cd python_driver
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate      # bash/zsh
+source .venv/bin/activate.fish # fish
 pip install -r requirements.txt
 ```
 
@@ -26,7 +27,7 @@ display.render()
 
 ## I2C 帧校验（协议 v3）
 
-发送端打开设备时完成 `SYNC`，随后使用带 16 位序号的 Modbus CRC16 写帧和固定 6 字节回执。读坏回执时优先重读。重发使用原序号和原帧字节。链路总超时、从机重启或下游结果未知时抛出 `I2cError`，此后可用 `recover()` 同步会话并重新初始化面板。适配器的 `I2C_TIMEOUT` 设为 100 ms；该设置是适配器级的，由同一适配器上的设备共享，关闭连接不会恢复原值。
+发送端打开设备时完成 `SYNC`，随后使用带 16 位序号的 Modbus CRC16 写帧和固定 6 字节回执。读坏回执时优先重读。重发使用原序号和原帧字节。链路总超时、从机重启、下游结果未知或回执字段非法（如非查询帧 `value` 非零）时抛出 `I2cError`，此后可用 `recover()` 同步会话并重新初始化面板。适配器的 `I2C_TIMEOUT` 设为 100 ms；该设置是适配器级的，由同一适配器上的设备共享，关闭连接不会恢复原值。
 
 对端须支持 v3，并在校验后按 SSD1309 原生格式转发命令和显示数据。见 [v3 规范](../docs/i2c-crc-protocol.md)和 [v3 接收端速查](../docs/i2c-crc-quickstart.md)。旧版线上格式见 [v2 规范](../docs/i2c-crc-protocol-v2.md)。
 
@@ -35,8 +36,8 @@ display.render()
 驱动统一使用以下异常：
 
 - `DriverError`：所有驱动错误的基类
-- `I2cError`：I2C 通信错误，包括 v3 会话失效和执行结果未知
-- `FrameRejectedError`：自定义传输明确报告可安全跳过的帧校验失败；内置 v3 `I2cBus` 不会抛出，v3 帧错误在传输内部重试，最终以 `I2cError` 结束会话
+- `I2cError`：I2C 通信错误，包括 v3 会话失效、回执字段非法和执行结果未知
+- `FrameRejectedError`：自定义传输明确报告可安全跳过的帧校验失败；内置 v3 `I2cBus` 不会抛出，v3 的接收错误在传输内部重试，会话失效或回执字段非法以 `I2cError` 结束会话
 - `NotInitializedError`：驱动未初始化
 - `InvalidDataError`：传入数据不合法或长度不足
 
